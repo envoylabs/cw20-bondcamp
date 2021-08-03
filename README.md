@@ -1,3 +1,5 @@
+![Build and Test](https://github.com/envoylabs/cw20-bondcamp/actions/workflows/build_and_test.yml/badge.svg)
+
 # CW-20 Bondcamp
 
 Excuse the name. More docs coming soon. Issue and buy tokens based on a `Work` by and `Artist` that has a permalink URI.
