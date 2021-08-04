@@ -1,5 +1,7 @@
 ![Build and Test](https://github.com/envoylabs/cw20-bondcamp/actions/workflows/build_and_test.yml/badge.svg)
 
+Important: work on this has been halted in favour of moving to a [CW1155](https://github.com/CosmWasm/cosmwasm-plus/tree/main/packages/cw1155) based contract.
+
 # CW-20 Bondcamp
 
 Excuse the name. More docs coming soon. Issue and buy tokens based on a `Work` by and `Artist` that has a permalink URI.
@@ -23,4 +25,5 @@ Alternatively, an artist themselves might want to instantiate one contract _per_
 
 - enforce meta URI uniqueness
   - question: how to handle bad-faith duplicates?
+    - probable answer: wrap in CW1155
 - reward mechanism
