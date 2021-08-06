@@ -1,8 +1,8 @@
+use cw20_bonding::msg::CurveType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::curves::{decimal, Constant, Curve, DecimalPlaces, Linear, SquareRoot};
-use cosmwasm_std::{Binary, Decimal, Uint128};
+use cosmwasm_std::{Binary, Uint128};
 use cw20::Expiration;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -16,7 +16,7 @@ pub struct InstantiateMsg {
     pub external_permalink_uri: String,
 
     /// the name of the artist, entity or creator. Should be unique, but obv this is tricky IRL
-    pub artist: String,
+    pub creator: String,
 
     /// the name of the work. one would hope artist + work would at least be unique
     pub work: String,
@@ -47,44 +47,6 @@ pub struct InstantiateMsg {
     /// write a custom `instantiate`, and then dispatch `your::execute` -> `cw20_bonding::do_execute`
     /// with your custom curve as a parameter (and same with `query` -> `do_query`)
     pub curve_type: CurveType,
-}
-
-pub type CurveFn = Box<dyn Fn(DecimalPlaces) -> Box<dyn Curve>>;
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CurveType {
-    /// Constant always returns `value * 10^-scale` as spot price
-    Constant { value: Uint128, scale: u32 },
-    /// Linear returns `slope * 10^-scale * supply` as spot price
-    Linear { slope: Uint128, scale: u32 },
-    /// SquareRoot returns `slope * 10^-scale * supply^0.5` as spot price
-    SquareRoot { slope: Uint128, scale: u32 },
-}
-
-impl CurveType {
-    pub fn to_curve_fn(&self) -> CurveFn {
-        match self.clone() {
-            CurveType::Constant { value, scale } => {
-                let calc = move |places| -> Box<dyn Curve> {
-                    Box::new(Constant::new(decimal(value, scale), places))
-                };
-                Box::new(calc)
-            }
-            CurveType::Linear { slope, scale } => {
-                let calc = move |places| -> Box<dyn Curve> {
-                    Box::new(Linear::new(decimal(slope, scale), places))
-                };
-                Box::new(calc)
-            }
-            CurveType::SquareRoot { slope, scale } => {
-                let calc = move |places| -> Box<dyn Curve> {
-                    Box::new(SquareRoot::new(decimal(slope, scale), places))
-                };
-                Box::new(calc)
-            }
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -153,14 +115,4 @@ pub enum QueryMsg {
     /// Implements CW20 "allowance" extension.
     /// Returns how much spender can use from owner account, 0 if unset.
     Allowance { owner: String, spender: String },
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct CurveInfoResponse {
-    // how many reserve tokens have been received
-    pub reserve: Uint128,
-    // how many supply tokens have been issued
-    pub supply: Uint128,
-    pub spot_price: Decimal,
-    pub reserve_denom: String,
 }

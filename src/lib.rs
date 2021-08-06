@@ -1,5 +1,5 @@
 pub mod contract;
-pub mod curves;
+// pub mod curves;
 mod error;
 pub mod msg;
 pub mod query;

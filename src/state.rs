@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use cosmwasm_std::Uint128;
 use cw_storage_plus::Item;
 
-use crate::curves::DecimalPlaces;
-use crate::msg::CurveType;
+use cw20_bonding::curves::DecimalPlaces;
+use cw20_bonding::msg::CurveType;
 
 use cw20_base::state::TokenInfo;
 
@@ -27,8 +27,8 @@ pub struct CurveState {
 impl CurveState {
     pub fn new(reserve_denom: String, decimals: DecimalPlaces) -> Self {
         CurveState {
-            reserve: Uint128(0),
-            supply: Uint128(0),
+            reserve: Uint128::new(0),
+            supply: Uint128::new(0),
             reserve_denom,
             decimals,
         }
@@ -39,7 +39,7 @@ impl CurveState {
 #[serde(rename_all = "snake_case")]
 pub struct TokenInfoWithMeta {
     pub external_permalink_uri: String,
-    pub artist: String,
+    pub creator: String,
     pub work: String,
     pub description: String,
     pub asset_uri: Option<String>,

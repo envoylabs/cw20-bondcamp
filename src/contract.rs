@@ -13,13 +13,15 @@ use cw20_base::allowances::{
 use cw20_base::contract::{execute_send, execute_transfer, query_balance};
 use cw20_base::state::{MinterData, TokenInfo, BALANCES};
 
-use crate::curves::DecimalPlaces;
 use crate::error::ContractError;
-use crate::msg::{CurveFn, CurveInfoResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::query::TokenInfoResponseWithMeta;
 use crate::state::{CurveState, TokenInfoWithMeta, CURVE_STATE, CURVE_TYPE, TOKEN_INFO_WITH_META};
 use cw0::{must_pay, nonpayable};
 use cw20::TokenInfoResponse;
+use cw20_bonding::contract::query_curve_info;
+use cw20_bonding::curves::DecimalPlaces;
+use cw20_bonding::msg::CurveFn;
 
 // version info for migration info
 const CONTRACT_NAME: &str = "cw20-bondcamp";
@@ -38,7 +40,7 @@ pub fn instantiate(
     // store token info using nested cw20-base format
     let data = TokenInfoWithMeta {
         external_permalink_uri: msg.external_permalink_uri,
-        artist: msg.artist,
+        creator: msg.creator,
         work: msg.work,
         description: msg.description,
         asset_uri: msg.asset_uri,
@@ -46,7 +48,7 @@ pub fn instantiate(
             name: msg.name,
             symbol: msg.symbol,
             decimals: msg.decimals,
-            total_supply: Uint128(0),
+            total_supply: Uint128::new(0),
             // set self as minter, so we can properly execute mint and burn
             mint: Some(MinterData {
                 minter: env.contract.address,
@@ -168,16 +170,10 @@ pub fn execute_burn(
         Ok(info)
     })?;
 
-    let res = Response {
-        submessages: vec![],
-        messages: vec![],
-        attributes: vec![
-            attr("action", "burn"),
-            attr("from", info.sender),
-            attr("amount", amount),
-        ],
-        data: None,
-    };
+    let res = Response::new()
+        .add_attribute("action", "burn")
+        .add_attribute("from", info.sender)
+        .add_attribute("amount", amount);
     Ok(res)
 }
 
@@ -205,7 +201,7 @@ pub fn execute_mint(
 
     // update supply and enforce cap
     config.token_info.total_supply += amount;
-    if let Some(limit) = config.get_cap() {
+    if let Some(limit) = config.token_info.get_cap() {
         if config.token_info.total_supply > limit {
             return Err(ContractError::Base(
                 cw20_base::ContractError::CannotExceedCap {},
@@ -222,19 +218,15 @@ pub fn execute_mint(
         |balance: Option<Uint128>| -> StdResult<_> { Ok(balance.unwrap_or_default() + amount) },
     )?;
 
-    let res = Response {
-        submessages: vec![],
-        messages: vec![],
-        attributes: vec![
-            attr("action", "mint"),
-            attr("to", recipient),
-            attr("amount", amount),
-        ],
-        data: None,
-    };
+    let res = Response::new()
+        .add_attribute("action", "mint")
+        .add_attribute("to", recipient)
+        .add_attribute("amount", amount);
     Ok(res)
 }
 
+// the-frey:
+// this is verbatim from cw20-bonding, we should probably refactor out
 pub fn execute_buy(
     deps: DepsMut,
     env: Env,
@@ -263,20 +255,16 @@ pub fn execute_buy(
     execute_mint(deps, env, sub_info, info.sender.to_string(), minted)?;
 
     // bond them to the validator
-    let res = Response {
-        submessages: vec![],
-        messages: vec![],
-        attributes: vec![
-            attr("action", "buy"),
-            attr("from", info.sender),
-            attr("reserve", payment),
-            attr("supply", minted),
-        ],
-        data: None,
-    };
+    let res = Response::new()
+        .add_attribute("action", "buy")
+        .add_attribute("from", info.sender)
+        .add_attribute("reserve", payment)
+        .add_attribute("supply", minted);
     Ok(res)
 }
 
+// the-frey:
+// this is verbatim from cw20-bonding, we should probably refactor out
 pub fn execute_sell(
     deps: DepsMut,
     env: Env,
@@ -365,16 +353,11 @@ fn do_sell(
         to_address: receiver.to_string(),
         amount: coins(released.u128(), state.reserve_denom),
     };
-    let res = Response {
-        submessages: vec![],
-        messages: vec![msg.into()],
-        attributes: vec![
-            attr("from", info.sender),
-            attr("supply", amount),
-            attr("reserve", released),
-        ],
-        data: None,
-    };
+    let res = Response::new()
+        .add_message(msg)
+        .add_attribute("from", info.sender)
+        .add_attribute("supply", amount)
+        .add_attribute("reserve", released);
     Ok(res)
 }
 
@@ -395,7 +378,7 @@ pub fn query_token_info_with_meta(deps: Deps) -> StdResult<TokenInfoResponseWith
     // which we don't care about but clients might
     let res = TokenInfoResponseWithMeta {
         external_permalink_uri: info.external_permalink_uri,
-        artist: info.artist,
+        creator: info.creator,
         work: info.work,
         description: info.description,
         asset_uri: info.asset_uri,
@@ -425,34 +408,14 @@ pub fn do_query(deps: Deps, _env: Env, msg: QueryMsg, curve_fn: CurveFn) -> StdR
     }
 }
 
-pub fn query_curve_info(deps: Deps, curve_fn: CurveFn) -> StdResult<CurveInfoResponse> {
-    let CurveState {
-        reserve,
-        supply,
-        reserve_denom,
-        decimals,
-    } = CURVE_STATE.load(deps.storage)?;
-
-    // This we can get from the local digits stored in instantiate
-    let curve = curve_fn(decimals);
-    let spot_price = curve.spot_price(supply);
-
-    Ok(CurveInfoResponse {
-        reserve,
-        supply,
-        spot_price,
-        reserve_denom,
-    })
-}
-
 // this is poor mans "skip" flag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::msg::CurveType;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{coin, Decimal, OverflowError, OverflowOperation, StdError};
+    use cosmwasm_std::{coin, Decimal, OverflowError, OverflowOperation, StdError, SubMsg};
     use cw0::PaymentError;
+    use cw20_bonding::msg::CurveType;
 
     const DENOM: &str = "satoshi";
     const CREATOR: &str = "creator";
@@ -469,12 +432,12 @@ mod tests {
             external_permalink_uri:
                 "https://squarepusher.bandcamp.com/album/feed-me-weird-things-remastered"
                     .to_string(),
-            artist: "Squarepusher".to_string(),
+            creator: "Squarepusher".to_string(),
             work: "Feed Me Weird Things (Remaster)".to_string(),
             description: "Feed Me Weird Things (Remaster) - Bandcamp".to_string(),
             asset_uri: asset_uri,
-            name: "Bonded".to_string(),
-            symbol: "EPOXY".to_string(),
+            name: "Windscale2Coin".to_string(),
+            symbol: "WIND".to_string(),
             decimals,
             reserve_denom: DENOM.to_string(),
             reserve_decimals,
@@ -510,7 +473,7 @@ mod tests {
         // this matches `linear_curve` test case from curves.rs
         let creator = String::from("creator");
         let curve_type = CurveType::SquareRoot {
-            slope: Uint128(1),
+            slope: Uint128::new(1),
             scale: 1,
         };
         let msg = default_instantiate(
@@ -528,19 +491,19 @@ mod tests {
         // token info is proper
         let token = query_token_info_with_meta(deps.as_ref()).unwrap();
         assert_eq!(&token.external_permalink_uri, &msg.external_permalink_uri);
-        assert_eq!(&token.artist, &msg.artist);
+        assert_eq!(&token.creator, &msg.creator);
         assert_eq!(&token.work, &msg.work);
         assert_eq!(&token.description, &msg.description);
         assert_eq!(&token.asset_uri, &msg.asset_uri);
         assert_eq!(&token.token_info_response.name, &msg.name);
         assert_eq!(&token.token_info_response.symbol, &msg.symbol);
         assert_eq!(token.token_info_response.decimals, 2);
-        assert_eq!(token.token_info_response.total_supply, Uint128(0));
+        assert_eq!(token.token_info_response.total_supply, Uint128::new(0));
 
         // curve state is sensible
         let state = query_curve_info(deps.as_ref(), curve_type.to_curve_fn()).unwrap();
-        assert_eq!(state.reserve, Uint128(0));
-        assert_eq!(state.supply, Uint128(0));
+        assert_eq!(state.reserve, Uint128::new(0));
+        assert_eq!(state.supply, Uint128::new(0));
         assert_eq!(state.reserve_denom.as_str(), DENOM);
         // spot price 0 as supply is 0
         assert_eq!(state.spot_price, Decimal::zero());
@@ -550,7 +513,7 @@ mod tests {
         assert_eq!(curve_type, curve);
 
         // no balance
-        assert_eq!(get_balance(deps.as_ref(), &creator), Uint128(0));
+        assert_eq!(get_balance(deps.as_ref(), &creator), Uint128::new(0));
     }
 
     #[test]
@@ -560,7 +523,7 @@ mod tests {
         // this matches `linear_curve` test case from curves.rs
         let creator = String::from("creator");
         let curve_type = CurveType::SquareRoot {
-            slope: Uint128(1),
+            slope: Uint128::new(1),
             scale: 1,
         };
         let msg = default_instantiate(None, 2, 8, curve_type.clone());
@@ -573,19 +536,19 @@ mod tests {
         // token info is proper
         let token = query_token_info_with_meta(deps.as_ref()).unwrap();
         assert_eq!(&token.external_permalink_uri, &msg.external_permalink_uri);
-        assert_eq!(&token.artist, &msg.artist);
+        assert_eq!(&token.creator, &msg.creator);
         assert_eq!(&token.work, &msg.work);
         assert_eq!(&token.description, &msg.description);
         assert_eq!(&token.asset_uri, &msg.asset_uri);
         assert_eq!(&token.token_info_response.name, &msg.name);
         assert_eq!(&token.token_info_response.symbol, &msg.symbol);
         assert_eq!(token.token_info_response.decimals, 2);
-        assert_eq!(token.token_info_response.total_supply, Uint128(0));
+        assert_eq!(token.token_info_response.total_supply, Uint128::new(0));
 
         // curve state is sensible
         let state = query_curve_info(deps.as_ref(), curve_type.to_curve_fn()).unwrap();
-        assert_eq!(state.reserve, Uint128(0));
-        assert_eq!(state.supply, Uint128(0));
+        assert_eq!(state.reserve, Uint128::new(0));
+        assert_eq!(state.supply, Uint128::new(0));
         assert_eq!(state.reserve_denom.as_str(), DENOM);
         // spot price 0 as supply is 0
         assert_eq!(state.spot_price, Decimal::zero());
@@ -595,13 +558,13 @@ mod tests {
         assert_eq!(curve_type, curve);
 
         // no balance
-        assert_eq!(get_balance(deps.as_ref(), &creator), Uint128(0));
+        assert_eq!(get_balance(deps.as_ref(), &creator), Uint128::new(0));
     }
     #[test]
     fn buy_issues_tokens() {
         let mut deps = mock_dependencies(&[]);
         let curve_type = CurveType::Linear {
-            slope: Uint128(1),
+            slope: Uint128::new(1),
             scale: 1,
         };
         setup_test(
@@ -618,46 +581,46 @@ mod tests {
         execute(deps.as_mut(), mock_env(), info, buy.clone()).unwrap();
 
         // bob got 1000 EPOXY (10.00)
-        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128(1000));
-        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128(0));
+        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(1000));
+        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128::new(0));
 
         // send them all to buyer
         let info = mock_info(INVESTOR, &[]);
         let send = ExecuteMsg::Transfer {
             recipient: BUYER.into(),
-            amount: Uint128(1000),
+            amount: Uint128::new(1000),
         };
         execute(deps.as_mut(), mock_env(), info, send).unwrap();
 
         // ensure balances updated
-        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128(0));
-        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128(1000));
+        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(0));
+        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128::new(1000));
 
         // second stake needs more to get next 1000 EPOXY
         let info = mock_info(INVESTOR, &coins(1_500_000_000, DENOM));
         execute(deps.as_mut(), mock_env(), info, buy).unwrap();
 
         // ensure balances updated
-        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128(1000));
-        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128(1000));
+        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(1000));
+        assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128::new(1000));
 
         // check curve info updated
         let curve = query_curve_info(deps.as_ref(), curve_type.to_curve_fn()).unwrap();
-        assert_eq!(curve.reserve, Uint128(2_000_000_000));
-        assert_eq!(curve.supply, Uint128(2000));
+        assert_eq!(curve.reserve, Uint128::new(2_000_000_000));
+        assert_eq!(curve.supply, Uint128::new(2000));
         assert_eq!(curve.spot_price, Decimal::percent(200));
 
         // check token info updated
         let token = query_token_info_with_meta(deps.as_ref()).unwrap();
         assert_eq!(token.token_info_response.decimals, 2);
-        assert_eq!(token.token_info_response.total_supply, Uint128(2000));
+        assert_eq!(token.token_info_response.total_supply, Uint128::new(2000));
     }
 
     #[test]
     fn bonding_fails_with_wrong_denom() {
         let mut deps = mock_dependencies(&[]);
         let curve_type = CurveType::Linear {
-            slope: Uint128(1),
+            slope: Uint128::new(1),
             scale: 1,
         };
         setup_test(
@@ -689,7 +652,7 @@ mod tests {
     fn burning_sends_reserve() {
         let mut deps = mock_dependencies(&[]);
         let curve_type = CurveType::Linear {
-            slope: Uint128(1),
+            slope: Uint128::new(1),
             scale: 1,
         };
         setup_test(
@@ -706,12 +669,12 @@ mod tests {
         execute(deps.as_mut(), mock_env(), info, buy).unwrap();
 
         // bob got 2000 EPOXY (20.00)
-        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128(2000));
+        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(2000));
 
         // cannot burn too much
         let info = mock_info(INVESTOR, &[]);
         let burn = ExecuteMsg::Burn {
-            amount: Uint128(3000),
+            amount: Uint128::new(3000),
         };
         let err = execute(deps.as_mut(), mock_env(), info, burn).unwrap_err();
         assert_eq!(
@@ -726,41 +689,40 @@ mod tests {
         // burn 1000 EPOXY to get back 15BTC (*10^8)
         let info = mock_info(INVESTOR, &[]);
         let burn = ExecuteMsg::Burn {
-            amount: Uint128(1000),
+            amount: Uint128::new(1000),
         };
         let res = execute(deps.as_mut(), mock_env(), info, burn).unwrap();
 
         // balance is lower
-        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128(1000));
+        assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(1000));
 
         // ensure we got our money back
         assert_eq!(1, res.messages.len());
         assert_eq!(
             &res.messages[0],
-            &BankMsg::Send {
+            &SubMsg::new(BankMsg::Send {
                 to_address: INVESTOR.into(),
                 amount: coins(1_500_000_000, DENOM),
-            }
-            .into()
+            })
         );
 
         // check curve info updated
         let curve = query_curve_info(deps.as_ref(), curve_type.to_curve_fn()).unwrap();
-        assert_eq!(curve.reserve, Uint128(500_000_000));
-        assert_eq!(curve.supply, Uint128(1000));
+        assert_eq!(curve.reserve, Uint128::new(500_000_000));
+        assert_eq!(curve.supply, Uint128::new(1000));
         assert_eq!(curve.spot_price, Decimal::percent(100));
 
         // check token info updated
         let token = query_token_info_with_meta(deps.as_ref()).unwrap();
         assert_eq!(token.token_info_response.decimals, 2);
-        assert_eq!(token.token_info_response.total_supply, Uint128(1000));
+        assert_eq!(token.token_info_response.total_supply, Uint128::new(1000));
     }
 
     #[test]
     fn cw20_imports_work() {
         let mut deps = mock_dependencies(&[]);
         let curve_type = CurveType::Constant {
-            value: Uint128(15),
+            value: Uint128::new(15),
             scale: 1,
         };
         setup_test(
@@ -781,51 +743,51 @@ mod tests {
         execute(deps.as_mut(), mock_env(), info, buy).unwrap();
 
         // check balances
-        assert_eq!(get_balance(deps.as_ref(), bob), Uint128(30_000_000));
-        assert_eq!(get_balance(deps.as_ref(), carl), Uint128(0));
+        assert_eq!(get_balance(deps.as_ref(), bob), Uint128::new(30_000_000));
+        assert_eq!(get_balance(deps.as_ref(), carl), Uint128::new(0));
 
         // send coins to carl
         let bob_info = mock_info(bob, &[]);
         let transfer = ExecuteMsg::Transfer {
             recipient: carl.into(),
-            amount: Uint128(2_000_000),
+            amount: Uint128::new(2_000_000),
         };
         execute(deps.as_mut(), mock_env(), bob_info.clone(), transfer).unwrap();
-        assert_eq!(get_balance(deps.as_ref(), bob), Uint128(28_000_000));
-        assert_eq!(get_balance(deps.as_ref(), carl), Uint128(2_000_000));
+        assert_eq!(get_balance(deps.as_ref(), bob), Uint128::new(28_000_000));
+        assert_eq!(get_balance(deps.as_ref(), carl), Uint128::new(2_000_000));
 
         // allow alice
         let allow = ExecuteMsg::IncreaseAllowance {
             spender: alice.into(),
-            amount: Uint128(35_000_000),
+            amount: Uint128::new(35_000_000),
             expires: None,
         };
         execute(deps.as_mut(), mock_env(), bob_info, allow).unwrap();
-        assert_eq!(get_balance(deps.as_ref(), bob), Uint128(28_000_000));
-        assert_eq!(get_balance(deps.as_ref(), alice), Uint128(0));
+        assert_eq!(get_balance(deps.as_ref(), bob), Uint128::new(28_000_000));
+        assert_eq!(get_balance(deps.as_ref(), alice), Uint128::new(0));
         assert_eq!(
             query_allowance(deps.as_ref(), bob.into(), alice.into())
                 .unwrap()
                 .allowance,
-            Uint128(35_000_000)
+            Uint128::new(35_000_000)
         );
 
         // alice takes some for herself
         let self_pay = ExecuteMsg::TransferFrom {
             owner: bob.into(),
             recipient: alice.into(),
-            amount: Uint128(25_000_000),
+            amount: Uint128::new(25_000_000),
         };
         let alice_info = mock_info(alice, &[]);
         execute(deps.as_mut(), mock_env(), alice_info, self_pay).unwrap();
-        assert_eq!(get_balance(deps.as_ref(), bob), Uint128(3_000_000));
-        assert_eq!(get_balance(deps.as_ref(), alice), Uint128(25_000_000));
-        assert_eq!(get_balance(deps.as_ref(), carl), Uint128(2_000_000));
+        assert_eq!(get_balance(deps.as_ref(), bob), Uint128::new(3_000_000));
+        assert_eq!(get_balance(deps.as_ref(), alice), Uint128::new(25_000_000));
+        assert_eq!(get_balance(deps.as_ref(), carl), Uint128::new(2_000_000));
         assert_eq!(
             query_allowance(deps.as_ref(), bob.into(), alice.into())
                 .unwrap()
                 .allowance,
-            Uint128(10_000_000)
+            Uint128::new(10_000_000)
         );
 
         // test burn from works properly (burn tested in burning_sends_reserve)
@@ -834,7 +796,7 @@ mod tests {
         let info = mock_info(alice, &[]);
         let burn_from = ExecuteMsg::BurnFrom {
             owner: bob.into(),
-            amount: Uint128(3_300_000),
+            amount: Uint128::new(3_300_000),
         };
         let err = execute(deps.as_mut(), mock_env(), info, burn_from).unwrap_err();
         assert_eq!(
@@ -850,23 +812,22 @@ mod tests {
         let info = mock_info(alice, &[]);
         let burn_from = ExecuteMsg::BurnFrom {
             owner: bob.into(),
-            amount: Uint128(1_000_000),
+            amount: Uint128::new(1_000_000),
         };
         let res = execute(deps.as_mut(), mock_env(), info, burn_from).unwrap();
 
         // bob balance is lower, not alice
-        assert_eq!(get_balance(deps.as_ref(), alice), Uint128(25_000_000));
-        assert_eq!(get_balance(deps.as_ref(), bob), Uint128(2_000_000));
+        assert_eq!(get_balance(deps.as_ref(), alice), Uint128::new(25_000_000));
+        assert_eq!(get_balance(deps.as_ref(), bob), Uint128::new(2_000_000));
 
         // ensure alice got our money back
         assert_eq!(1, res.messages.len());
         assert_eq!(
             &res.messages[0],
-            &BankMsg::Send {
+            &SubMsg::new(BankMsg::Send {
                 to_address: alice.into(),
                 amount: coins(1_500, DENOM),
-            }
-            .into()
+            })
         );
     }
 }
