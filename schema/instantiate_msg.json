@@ -3,7 +3,7 @@
   "title": "InstantiateMsg",
   "type": "object",
   "required": [
-    "artist",
+    "creator",
     "curve_type",
     "decimals",
     "description",
@@ -15,16 +15,16 @@
     "work"
   ],
   "properties": {
-    "artist": {
-      "description": "the name of the artist, entity or creator. Should be unique, but obv this is tricky IRL",
-      "type": "string"
-    },
     "asset_uri": {
       "description": "(optional) an asset URI to store. Maybe this should be updateable in future?",
       "type": [
         "string",
         "null"
       ]
+    },
+    "creator": {
+      "description": "the name of the artist, entity or creator. Should be unique, but obv this is tricky IRL",
+      "type": "string"
     },
     "curve_type": {
       "description": "enum to store the curve parameters used for this contract if you want to add a custom Curve, you should make a new contract that imports this one. write a custom `instantiate`, and then dispatch `your::execute` -> `cw20_bonding::do_execute` with your custom curve as a parameter (and same with `query` -> `do_query`)",

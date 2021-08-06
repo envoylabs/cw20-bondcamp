@@ -4,7 +4,8 @@ use std::fs::create_dir_all;
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
 use cw20::{AllowanceResponse, BalanceResponse, TokenInfoResponse};
-use cw20_bondcamp::msg::{CurveInfoResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+use cw20_bondcamp::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use cw20_bonding::msg::CurveInfoResponse;
 
 fn main() {
     let mut out_dir = current_dir().unwrap();
