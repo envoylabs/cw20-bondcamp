@@ -1,27 +1,31 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    attr, coins, to_binary, Addr, BankMsg, Binary, Deps, DepsMut, Env, MessageInfo, Response,
-    StdError, StdResult, Uint128,
+    to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult, Uint128,
 };
 
 use cw2::set_contract_version;
 use cw20_base::allowances::{
-    deduct_allowance, execute_decrease_allowance, execute_increase_allowance, execute_send_from,
+    execute_decrease_allowance, execute_increase_allowance, execute_send_from,
     execute_transfer_from, query_allowance,
 };
 use cw20_base::contract::{execute_send, execute_transfer, query_balance};
-use cw20_base::state::{MinterData, TokenInfo, BALANCES};
+use cw20_base::state::{MinterData, TokenInfo};
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::query::TokenInfoResponseWithMeta;
-use crate::state::{CurveState, TokenInfoWithMeta, CURVE_STATE, CURVE_TYPE, TOKEN_INFO_WITH_META};
-use cw0::{must_pay, nonpayable};
+use crate::state::{
+    CurveState, InvestmentInfo, Supply, TokenInfoWithMeta, CURVE_STATE, CURVE_TYPE, INVESTMENT,
+    TOKEN_INFO_WITH_META, TOTAL_SUPPLY,
+};
+use cw0::nonpayable;
 use cw20::TokenInfoResponse;
 use cw20_bonding::contract::query_curve_info;
 use cw20_bonding::curves::DecimalPlaces;
 use cw20_bonding::msg::CurveFn;
+
+use crate::bonding::{execute_buy, execute_sell, execute_sell_from};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "cw20-bondcamp";
@@ -36,6 +40,17 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     nonpayable(&info)?;
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+    // ensure the validator is registered
+    let vals = deps.querier.query_all_validators()?;
+    if !vals
+        .iter()
+        .any(|v| v.address == msg.staking_params.validator)
+    {
+        return Err(ContractError::NotInValidatorSet {
+            validator: msg.staking_params.validator,
+        });
+    }
 
     // store token info using nested cw20-base format
     let data = TokenInfoWithMeta {
@@ -57,6 +72,22 @@ pub fn instantiate(
         },
     };
     TOKEN_INFO_WITH_META.save(deps.storage, &data)?;
+
+    // marshal data for investment info
+    let denom = deps.querier.query_bonded_denom()?;
+    let investment_info = InvestmentInfo {
+        owner: info.sender,
+        exit_tax: msg.staking_params.exit_tax,
+        unbonding_period: msg.staking_params.unbonding_period,
+        bond_denom: denom,
+        validator: msg.staking_params.validator,
+        min_withdrawal: msg.staking_params.min_withdrawal,
+    };
+    INVESTMENT.save(deps.storage, &investment_info)?;
+
+    // set supply to 0
+    let supply = Supply::default();
+    TOTAL_SUPPLY.save(deps.storage, &supply)?;
 
     let places = DecimalPlaces::new(msg.decimals, msg.reserve_decimals);
     let supply = CurveState::new(msg.reserve_denom, places);
@@ -101,6 +132,13 @@ pub fn do_execute(
             Ok(execute_sell_from(deps, env, info, curve_fn, owner, amount)?)
         }
 
+        // this is the staking logic
+        // ExecuteMsg::Bond {} => bond(deps, env, info),
+        // ExecuteMsg::Unbond { amount } => unbond(deps, env, info, amount),
+        // ExecuteMsg::Claim {} => claim(deps, env, info),
+        // ExecuteMsg::Reinvest {} => reinvest(deps, env, info),
+        // ExecuteMsg::_BondAllTokens {} => _bond_all_tokens(deps, env, info),
+
         // these all come from cw20-base to implement the cw20 standard
         ExecuteMsg::Transfer { recipient, amount } => {
             Ok(execute_transfer(deps, env, info, recipient, amount)?)
@@ -142,225 +180,6 @@ pub fn do_execute(
     }
 }
 
-// the-frey: this is again a slight change to the one defined in cw20-base
-// as we have different types and so stuff goes askew
-pub fn execute_burn(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    if amount == Uint128::zero() {
-        return Err(ContractError::Base(
-            cw20_base::ContractError::InvalidZeroAmount {},
-        ));
-    }
-
-    // lower balance
-    BALANCES.update(
-        deps.storage,
-        &info.sender,
-        |balance: Option<Uint128>| -> StdResult<_> {
-            Ok(balance.unwrap_or_default().checked_sub(amount)?)
-        },
-    )?;
-    // reduce total_supply
-    TOKEN_INFO_WITH_META.update(deps.storage, |mut info| -> StdResult<_> {
-        info.token_info.total_supply = info.token_info.total_supply.checked_sub(amount)?;
-        Ok(info)
-    })?;
-
-    let res = Response::new()
-        .add_attribute("action", "burn")
-        .add_attribute("from", info.sender)
-        .add_attribute("amount", amount);
-    Ok(res)
-}
-
-// the-frey: this is again a slight change to the one defined in cw20-base
-// as we have different types and so stuff goes askew
-pub fn execute_mint(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    recipient: String,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    if amount == Uint128::zero() {
-        return Err(ContractError::Base(
-            cw20_base::ContractError::InvalidZeroAmount {},
-        ));
-    }
-
-    let mut config = TOKEN_INFO_WITH_META.load(deps.storage)?;
-    if config.token_info.mint.is_none()
-        || config.token_info.mint.as_ref().unwrap().minter != info.sender
-    {
-        return Err(ContractError::Unauthorized {});
-    }
-
-    // update supply and enforce cap
-    config.token_info.total_supply += amount;
-    if let Some(limit) = config.token_info.get_cap() {
-        if config.token_info.total_supply > limit {
-            return Err(ContractError::Base(
-                cw20_base::ContractError::CannotExceedCap {},
-            ));
-        }
-    }
-    TOKEN_INFO_WITH_META.save(deps.storage, &config)?;
-
-    // add amount to recipient balance
-    let rcpt_addr = deps.api.addr_validate(&recipient)?;
-    BALANCES.update(
-        deps.storage,
-        &rcpt_addr,
-        |balance: Option<Uint128>| -> StdResult<_> { Ok(balance.unwrap_or_default() + amount) },
-    )?;
-
-    let res = Response::new()
-        .add_attribute("action", "mint")
-        .add_attribute("to", recipient)
-        .add_attribute("amount", amount);
-    Ok(res)
-}
-
-// the-frey:
-// this is verbatim from cw20-bonding, we should probably refactor out
-pub fn execute_buy(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    curve_fn: CurveFn,
-) -> Result<Response, ContractError> {
-    let mut state = CURVE_STATE.load(deps.storage)?;
-
-    let payment = must_pay(&info, &state.reserve_denom)?;
-
-    // calculate how many tokens can be purchased with this and mint them
-    let curve = curve_fn(state.decimals);
-    state.reserve += payment;
-    let new_supply = curve.supply(state.reserve);
-    let minted = new_supply
-        .checked_sub(state.supply)
-        .map_err(StdError::overflow)?;
-    state.supply = new_supply;
-    CURVE_STATE.save(deps.storage, &state)?;
-
-    // call into cw20-base to mint the token, call as self as no one else is allowed
-    let sub_info = MessageInfo {
-        sender: env.contract.address.clone(),
-        funds: vec![],
-    };
-    execute_mint(deps, env, sub_info, info.sender.to_string(), minted)?;
-
-    // bond them to the validator
-    let res = Response::new()
-        .add_attribute("action", "buy")
-        .add_attribute("from", info.sender)
-        .add_attribute("reserve", payment)
-        .add_attribute("supply", minted);
-    Ok(res)
-}
-
-// the-frey:
-// this is verbatim from cw20-bonding, we should probably refactor out
-pub fn execute_sell(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    curve_fn: CurveFn,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    nonpayable(&info)?;
-    let receiver = info.sender.clone();
-    // do all the work
-    let mut res = do_sell(deps, env, info, curve_fn, receiver, amount)?;
-
-    // add our custom attributes
-    res.attributes.push(attr("action", "burn"));
-    Ok(res)
-}
-
-// the-frey: even though this is the default impl
-// not convinced it does exactly what we want here. TBC
-pub fn execute_sell_from(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    curve_fn: CurveFn,
-    owner: String,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    nonpayable(&info)?;
-    let owner_addr = deps.api.addr_validate(&owner)?;
-    let spender_addr = info.sender.clone();
-
-    // deduct allowance before doing anything else have enough allowance
-    deduct_allowance(deps.storage, &owner_addr, &spender_addr, &env.block, amount)?;
-
-    // do all the work in do_sell
-    let receiver_addr = info.sender;
-    let owner_info = MessageInfo {
-        sender: owner_addr,
-        funds: info.funds,
-    };
-    let mut res = do_sell(
-        deps,
-        env,
-        owner_info,
-        curve_fn,
-        receiver_addr.clone(),
-        amount,
-    )?;
-
-    // add our custom attributes
-    res.attributes.push(attr("action", "burn_from"));
-    res.attributes.push(attr("by", receiver_addr));
-    Ok(res)
-}
-
-fn do_sell(
-    mut deps: DepsMut,
-    env: Env,
-    // info.sender is the one burning tokens
-    info: MessageInfo,
-    curve_fn: CurveFn,
-    // receiver is the one who gains (same for execute_sell, diff for execute_sell_from)
-    receiver: Addr,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    // burn from the caller, this ensures there are tokens to cover this
-    execute_burn(deps.branch(), env, info.clone(), amount)?;
-
-    // calculate how many tokens can be purchased with this and mint them
-    let mut state = CURVE_STATE.load(deps.storage)?;
-    let curve = curve_fn(state.decimals);
-    state.supply = state
-        .supply
-        .checked_sub(amount)
-        .map_err(StdError::overflow)?;
-    let new_reserve = curve.reserve(state.supply);
-    let released = state
-        .reserve
-        .checked_sub(new_reserve)
-        .map_err(StdError::overflow)?;
-    state.reserve = new_reserve;
-    CURVE_STATE.save(deps.storage, &state)?;
-
-    // now send the tokens to the sender (TODO: for sell_from we do something else, right???)
-    let msg = BankMsg::Send {
-        to_address: receiver.to_string(),
-        amount: coins(released.u128(), state.reserve_denom),
-    };
-    let res = Response::new()
-        .add_message(msg)
-        .add_attribute("from", info.sender)
-        .add_attribute("supply", amount)
-        .add_attribute("reserve", released);
-    Ok(res)
-}
-
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     // default implementation stores curve info as enum, you can do something else in a derived
@@ -397,7 +216,12 @@ pub fn query_token_info_with_meta(deps: Deps) -> StdResult<TokenInfoResponseWith
 /// to use custom math not included - make this easily reusable
 pub fn do_query(deps: Deps, _env: Env, msg: QueryMsg, curve_fn: CurveFn) -> StdResult<Binary> {
     match msg {
-        // custom queries
+        // // custom queries for staking
+        // QueryMsg::Claims { address } => {
+        //     to_binary(&CLAIMS.query_claims(deps, &deps.api.addr_validate(&address)?)?)
+        // }
+        // QueryMsg::Investment {} => to_binary(&query_investment(deps)?),
+        // custom queries for bonding
         QueryMsg::CurveInfo {} => to_binary(&query_curve_info(deps, curve_fn)?),
         // inherited from cw20-base
         QueryMsg::TokenInfo {} => to_binary(&query_token_info_with_meta(deps)?),
@@ -412,21 +236,30 @@ pub fn do_query(deps: Deps, _env: Env, msg: QueryMsg, curve_fn: CurveFn) -> StdR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{coin, Decimal, OverflowError, OverflowOperation, StdError, SubMsg};
-    use cw0::PaymentError;
+    use crate::msg::StakingParams;
+
     use cw20_bonding::msg::CurveType;
+
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info, MockQuerier};
+    use cosmwasm_std::{
+        coin, coins, BankMsg, Decimal, OverflowError, OverflowOperation, StdError, SubMsg,
+        Validator,
+    };
+    use cw0::{PaymentError, DAY};
 
     const DENOM: &str = "satoshi";
     const CREATOR: &str = "creator";
     const INVESTOR: &str = "investor";
     const BUYER: &str = "buyer";
+    const DEFAULT_VALIDATOR: &str = "default-validator";
 
     fn default_instantiate(
         asset_uri: Option<String>,
         decimals: u8,
         reserve_decimals: u8,
         curve_type: CurveType,
+        tax_percent: u64,
+        min_withdrawal: u128,
     ) -> InstantiateMsg {
         InstantiateMsg {
             external_permalink_uri:
@@ -442,6 +275,12 @@ mod tests {
             reserve_denom: DENOM.to_string(),
             reserve_decimals,
             curve_type,
+            staking_params: StakingParams {
+                validator: String::from(DEFAULT_VALIDATOR),
+                unbonding_period: DAY * 3,
+                exit_tax: Decimal::percent(tax_percent),
+                min_withdrawal: Uint128::new(min_withdrawal),
+            },
         }
     }
 
@@ -458,7 +297,7 @@ mod tests {
     ) {
         // this matches `linear_curve` test case from curves.rs
         let creator = String::from(CREATOR);
-        let msg = default_instantiate(asset_uri, decimals, reserve_decimals, curve_type);
+        let msg = default_instantiate(asset_uri, decimals, reserve_decimals, curve_type, 2, 50);
         let info = mock_info(&creator, &[]);
 
         // make sure we can instantiate with this
@@ -469,6 +308,7 @@ mod tests {
     #[test]
     fn proper_instantiation() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
 
         // this matches `linear_curve` test case from curves.rs
         let creator = String::from("creator");
@@ -481,6 +321,8 @@ mod tests {
             2,
             8,
             curve_type.clone(),
+            2,
+            50,
         );
         let info = mock_info(&creator, &[]);
 
@@ -519,6 +361,7 @@ mod tests {
     #[test]
     fn proper_instantiation_even_with_no_asset_uri() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
 
         // this matches `linear_curve` test case from curves.rs
         let creator = String::from("creator");
@@ -526,7 +369,7 @@ mod tests {
             slope: Uint128::new(1),
             scale: 1,
         };
-        let msg = default_instantiate(None, 2, 8, curve_type.clone());
+        let msg = default_instantiate(None, 2, 8, curve_type.clone(), 2, 50);
         let info = mock_info(&creator, &[]);
 
         // make sure we can instantiate with this
@@ -563,6 +406,8 @@ mod tests {
     #[test]
     fn buy_issues_tokens() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
+
         let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
             scale: 1,
@@ -619,6 +464,8 @@ mod tests {
     #[test]
     fn bonding_fails_with_wrong_denom() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
+
         let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
             scale: 1,
@@ -651,6 +498,8 @@ mod tests {
     #[test]
     fn burning_sends_reserve() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
+
         let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
             scale: 1,
@@ -718,9 +567,77 @@ mod tests {
         assert_eq!(token.token_info_response.total_supply, Uint128::new(1000));
     }
 
+    //
+    //  ---- staking starts here ----
+    //
+
+    fn sample_validator(addr: &str) -> Validator {
+        Validator {
+            address: addr.into(),
+            commission: Decimal::percent(3),
+            max_commission: Decimal::percent(10),
+            max_change_rate: Decimal::percent(1),
+        }
+    }
+
+    fn set_validator(querier: &mut MockQuerier) {
+        querier.update_staking("ustake", &[sample_validator(DEFAULT_VALIDATOR)], &[]);
+    }
+
+    #[test]
+    fn instantiation_with_missing_validator() {
+        let mut deps = mock_dependencies(&[]);
+        deps.querier
+            .update_staking("ustake", &[sample_validator("john")], &[]);
+
+        let curve_type = CurveType::Linear {
+            slope: Uint128::new(1),
+            scale: 1,
+        };
+
+        let creator = String::from("creator");
+        let msg = InstantiateMsg {
+            external_permalink_uri:
+                "https://squarepusher.bandcamp.com/album/feed-me-weird-things-remastered"
+                    .to_string(),
+            creator: "Squarepusher".to_string(),
+            work: "Feed Me Weird Things (Remaster)".to_string(),
+            description: "Feed Me Weird Things (Remaster) - Bandcamp".to_string(),
+            name: "Windscale2Coin".to_string(),
+            symbol: "WIND".to_string(),
+            decimals: 2,
+            reserve_denom: DENOM.to_string(),
+            reserve_decimals: 8,
+            asset_uri: None,
+            curve_type: curve_type.clone(),
+            staking_params: StakingParams {
+                validator: String::from("my-validator-addr"),
+                unbonding_period: DAY * 3,
+                exit_tax: Decimal::percent(2),
+                min_withdrawal: Uint128::new(50),
+            },
+        };
+        let info = mock_info(&creator, &[]);
+
+        // make sure we can instantiate with this
+        let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        assert_eq!(
+            err,
+            ContractError::NotInValidatorSet {
+                validator: "my-validator-addr".into()
+            }
+        );
+    }
+
+    //
+    //  ---- staking ends here ----
+    //
+
     #[test]
     fn cw20_imports_work() {
         let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
+
         let curve_type = CurveType::Constant {
             value: Uint128::new(15),
             scale: 1,
