@@ -19,6 +19,10 @@ This is intended to be used for discovery, rather than media playback, hence why
 
 Alternatively, an artist themselves might want to instantiate one contract _per_ service. Not 100% why you'd do that, but it's an option.
 
+# UI
+
+The ambition is that a UI will manage instances of this contract, probably using a dedicated data store to capture some of the associated information. The metadata contained on-chain in the TokenWithMeta instances is therefore mainly for forward compatibility, as the contract addresses could be looked up and used to re-populate a new data store in the future.
+
 ## TODO:
 
 In order to address some of these issues outside of having a separate data store or UI validation, moving to a [CW1155](https://github.com/CosmWasm/cosmwasm-plus/tree/main/packages/cw1155) based contract would be necessary.
