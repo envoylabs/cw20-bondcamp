@@ -9,7 +9,7 @@ use cw20::{AllowanceResponse, BalanceResponse};
 // };
 
 use cw20_bondcamp::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use cw20_bondcamp::query::TokenInfoResponseWithMeta;
+use cw20_bondcamp::query::{ClaimsResponse, InvestmentResponse, TokenInfoResponseWithMeta};
 use cw20_bonding::msg::CurveInfoResponse;
 
 fn main() {
@@ -28,6 +28,6 @@ fn main() {
     export_schema(&schema_for!(TokenInfoResponseWithMeta), &out_dir);
 
     // staking
-    // export_schema(&schema_for!(ClaimsResponse), &out_dir);
-    // export_schema(&schema_for!(InvestmentResponse), &out_dir);
+    export_schema(&schema_for!(ClaimsResponse), &out_dir);
+    export_schema(&schema_for!(InvestmentResponse), &out_dir);
 }

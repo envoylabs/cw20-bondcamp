@@ -3,6 +3,40 @@
   "title": "QueryMsg",
   "anyOf": [
     {
+      "description": "Claims shows the number of tokens this address can access when they are done unbonding",
+      "type": "object",
+      "required": [
+        "claims"
+      ],
+      "properties": {
+        "claims": {
+          "type": "object",
+          "required": [
+            "address"
+          ],
+          "properties": {
+            "address": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Investment shows metadata on the staking info of the contract",
+      "type": "object",
+      "required": [
+        "investment"
+      ],
+      "properties": {
+        "investment": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
       "description": "Returns the reserve and supply quantities, as well as the spot price to buy 1 token",
       "type": "object",
       "required": [
