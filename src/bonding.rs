@@ -111,6 +111,8 @@ pub fn execute_buy(
     // calculate how many tokens can be purchased with this and mint them
     let curve = curve_fn(state.decimals);
     state.reserve += payment;
+
+    // curve.supply() calculates native -> CW20
     let new_supply = curve.supply(state.reserve);
     let minted = new_supply
         .checked_sub(state.supply)
@@ -211,6 +213,8 @@ fn do_sell(
         .supply
         .checked_sub(amount)
         .map_err(StdError::overflow)?;
+
+    // curve.reserve() calculates CW20 -> native
     let new_reserve = curve.reserve(state.supply);
     let released = state
         .reserve

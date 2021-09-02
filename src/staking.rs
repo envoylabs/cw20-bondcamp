@@ -2,6 +2,7 @@ use cosmwasm_std::{
     coin, to_binary, Addr, BankMsg, Decimal, Deps, DepsMut, DistributionMsg, Env, MessageInfo,
     QuerierWrapper, Response, StakingMsg, StdError, StdResult, Uint128, WasmMsg,
 };
+use cw20_bonding::msg::CurveFn;
 
 use crate::bonding::{execute_burn, execute_mint};
 use crate::error::ContractError;
@@ -43,7 +44,12 @@ fn assert_bonds(curve_state: &CurveState, bonded: Uint128) -> Result<(), Contrac
     }
 }
 
-pub fn bond(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
+pub fn bond(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    curve_fn: CurveFn,
+) -> Result<Response, ContractError> {
     // ensure we have the proper denom
     let invest = INVESTMENT.load(deps.storage)?;
     // payment finds the proper coin (or throws an error)
@@ -60,17 +66,34 @@ pub fn bond(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, Cont
 
     // calculate to_mint and update total supply
     let mut curve_state = CURVE_STATE.load(deps.storage)?;
+
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
     // have expensive queries everywhere
     assert_bonds(&curve_state, bonded)?;
-    let to_mint = if curve_state.supply.is_zero() || bonded.is_zero() {
-        FALLBACK_RATIO * payment.amount
-    } else {
-        payment.amount.multiply_ratio(curve_state.supply, bonded)
-    };
-    curve_state.reserve = bonded + payment.amount;
-    curve_state.supply += to_mint;
+
+    // this logic should be the same as execute buy
+    // let to_mint = if curve_state.supply.is_zero() || bonded.is_zero() {
+    //     FALLBACK_RATIO * payment.amount
+    // } else {
+    //     payment.amount.multiply_ratio(curve_state.supply, bonded)
+    // };
+    // curve_state.reserve = bonded + payment.amount;
+    // curve_state.supply += to_mint;
+    // CURVE_STATE.save(deps.storage, &curve_state)?;
+    // end of the bit that needs changing
+
+    // let payment: Uint128 = must_pay(&info, &state.reserve_denom)?;
+
+    let curve = curve_fn(curve_state.decimals);
+    curve_state.reserve += payment.amount;
+
+    // curve.supply() calculates native -> CW20
+    let new_supply = curve.supply(curve_state.reserve);
+    let minted = new_supply
+        .checked_sub(curve_state.supply)
+        .map_err(StdError::overflow)?;
+    curve_state.supply = new_supply;
     CURVE_STATE.save(deps.storage, &curve_state)?;
 
     // call into cw20-base to mint the token, call as self as no one else is allowed
@@ -78,7 +101,7 @@ pub fn bond(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, Cont
         sender: env.contract.address.clone(),
         funds: vec![],
     };
-    execute_mint(deps, env, sub_info, info.sender.to_string(), to_mint)?;
+    execute_mint(deps, env, sub_info, info.sender.to_string(), minted)?;
 
     // bond them to the validator
     let res = Response::new()
@@ -89,7 +112,7 @@ pub fn bond(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, Cont
         .add_attribute("action", "bond")
         .add_attribute("from", info.sender)
         .add_attribute("bonded", payment.amount)
-        .add_attribute("minted", to_mint);
+        .add_attribute("minted", minted);
     Ok(res)
 }
 
@@ -97,6 +120,7 @@ pub fn unbond(
     mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
+    curve_fn: CurveFn,
     amount: Uint128,
 ) -> Result<Response, ContractError> {
     let invest = INVESTMENT.load(deps.storage)?;
@@ -131,19 +155,34 @@ pub fn unbond(
     // bonded is the total number of tokens we have delegated from this address
     let bonded = get_bonded(&deps.querier, &env.contract.address)?;
 
-    // calculate how many native tokens this is worth and update curve state
-    let remainder = amount.checked_sub(tax).map_err(StdError::overflow)?;
+    // calculate how many native tokens this is worth from curve
+    // to do this, first we load curve state
     let mut curve_state = CURVE_STATE.load(deps.storage)?;
+
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
     // have expensive queries everywhere
     assert_bonds(&curve_state, bonded)?;
-    let unbond = remainder.multiply_ratio(bonded, curve_state.supply);
-    curve_state.reserve = bonded.checked_sub(unbond).map_err(StdError::overflow)?;
+
+    // unbond the amount minus tax
+    let amount_minus_tax = amount.checked_sub(tax).map_err(StdError::overflow)?;
+    let curve = curve_fn(curve_state.decimals);
     curve_state.supply = curve_state
         .supply
-        .checked_sub(remainder)
+        .checked_sub(amount_minus_tax)
         .map_err(StdError::overflow)?;
+
+    // curve.reserve() calculates CW20 -> native
+    // we've just updated total supply of CW20
+    // so we use that to calc the total reserve
+    // unbond is old reserve minus new reserve
+    // giving the amount of native tokens being unbonded
+    let new_reserve = curve.reserve(curve_state.supply);
+    let unbond = curve_state
+        .reserve
+        .checked_sub(new_reserve)
+        .map_err(StdError::overflow)?;
+    curve_state.reserve = new_reserve;
     curve_state.claims += unbond;
     CURVE_STATE.save(deps.storage, &curve_state)?;
 
@@ -247,6 +286,10 @@ pub fn _bond_all_tokens(
         balance.amount = balance.amount.checked_sub(curve_state.claims)?;
         // this just triggers the "no op" case if we don't have min_withdrawal left to reinvest
         balance.amount.checked_sub(invest.min_withdrawal)?;
+
+        // TODO: think about this some more.
+        // need coffee and a full night of sleep cos moderately certain
+        // that this ain't right like
         curve_state.reserve += balance.amount;
         Ok(curve_state)
     }) {

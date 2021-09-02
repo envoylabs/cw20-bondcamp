@@ -134,8 +134,8 @@ pub fn do_execute(
         }
 
         // this is the staking logic
-        ExecuteMsg::Bond {} => bond(deps, env, info),
-        ExecuteMsg::Unbond { amount } => unbond(deps, env, info, amount),
+        ExecuteMsg::Bond {} => bond(deps, env, info, curve_fn),
+        ExecuteMsg::Unbond { amount } => unbond(deps, env, info, curve_fn, amount),
         ExecuteMsg::Claim {} => claim(deps, env, info),
         ExecuteMsg::Reinvest {} => reinvest(deps, env, info),
         ExecuteMsg::_BondAllTokens {} => _bond_all_tokens(deps, env, info),
