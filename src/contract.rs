@@ -14,16 +14,16 @@ use cw20_base::state::{MinterData, TokenInfo};
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::query::TokenInfoResponseWithMeta;
+use crate::query::{CurveInfoResponse, TokenInfoResponseWithMeta};
 use crate::state::{
-    CurveState, InvestmentInfo, Supply, TokenInfoWithMeta, CLAIMS, CURVE_STATE, CURVE_TYPE,
-    INVESTMENT, TOKEN_INFO_WITH_META, TOTAL_SUPPLY,
+    CurveState, InvestmentInfo, TokenInfoWithMeta, CLAIMS, CURVE_STATE, CURVE_TYPE, INVESTMENT,
+    TOKEN_INFO_WITH_META,
 };
 use cw0::nonpayable;
 use cw20::TokenInfoResponse;
-use cw20_bonding::contract::query_curve_info;
-use cw20_bonding::curves::DecimalPlaces;
 use cw20_bonding::msg::CurveFn;
+
+use cw20_bonding::curves::DecimalPlaces;
 
 use crate::bonding::{execute_buy, execute_sell, execute_sell_from};
 use crate::staking::{_bond_all_tokens, bond, claim, query_investment, reinvest, unbond};
@@ -87,8 +87,8 @@ pub fn instantiate(
     INVESTMENT.save(deps.storage, &investment_info)?;
 
     // set supply to 0
-    let supply = Supply::default();
-    TOTAL_SUPPLY.save(deps.storage, &supply)?;
+    // let supply = Supply::default();
+    // TOTAL_SUPPLY.save(deps.storage, &supply)?;
 
     let places = DecimalPlaces::new(msg.decimals, msg.reserve_decimals);
     let supply = CurveState::new(msg.reserve_denom, places);
@@ -233,6 +233,28 @@ pub fn do_query(deps: Deps, _env: Env, msg: QueryMsg, curve_fn: CurveFn) -> StdR
     }
 }
 
+pub fn query_curve_info(deps: Deps, curve_fn: CurveFn) -> StdResult<CurveInfoResponse> {
+    let CurveState {
+        reserve,
+        supply,
+        reserve_denom,
+        decimals,
+        claims,
+    } = CURVE_STATE.load(deps.storage)?;
+
+    // This we can get from the local digits stored in instantiate
+    let curve = curve_fn(decimals);
+    let spot_price = curve.spot_price(supply);
+
+    Ok(CurveInfoResponse {
+        reserve,
+        supply,
+        spot_price,
+        reserve_denom,
+        claims,
+    })
+}
+
 // this is poor mans "skip" flag
 #[cfg(test)]
 mod tests {
@@ -242,7 +264,7 @@ mod tests {
     use cw_controllers::Claim;
     use std::str::FromStr;
 
-    use cw20_bonding::msg::CurveType;
+    use crate::msg::CurveType;
 
     use cosmwasm_std::testing::{
         mock_dependencies, mock_env, mock_info, MockQuerier, MOCK_CONTRACT_ADDR,

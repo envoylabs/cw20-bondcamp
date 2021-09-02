@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::Item;
 
+use crate::msg::CurveType;
 use cw20_bonding::curves::DecimalPlaces;
-use cw20_bonding::msg::CurveType;
 
 use cw20_base::state::TokenInfo;
 
@@ -27,6 +27,9 @@ pub struct CurveState {
 
     // how to normalize reserve and supply
     pub decimals: DecimalPlaces,
+
+    /// claims is how many tokens need to be reserved for paying back those who unbonded
+    pub claims: Uint128,
 }
 
 impl CurveState {
@@ -36,6 +39,7 @@ impl CurveState {
             supply: Uint128::new(0),
             reserve_denom,
             decimals,
+            claims: Uint128::new(0),
         }
     }
 }
@@ -77,22 +81,9 @@ pub struct InvestmentInfo {
     pub min_withdrawal: Uint128,
 }
 
-/// Supply is dynamic and tracks the current supply of staked and CW20 tokens.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, Default)]
-pub struct Supply {
-    /// issued is how many derivative tokens this contract has issued
-    pub issued: Uint128,
-    /// bonded is how many native tokens exist bonded to the validator
-    pub bonded: Uint128,
-    /// claims is how many tokens need to be reserved paying back those who unbonded
-    pub claims: Uint128,
-}
-
 pub const CLAIMS: Claims = Claims::new("claims");
 
 pub const INVESTMENT: Item<InvestmentInfo> = Item::new("invest");
-
-pub const TOTAL_SUPPLY: Item<Supply> = Item::new("total_supply");
 
 pub const CURVE_STATE: Item<CurveState> = Item::new("curve_state");
 

@@ -33,3 +33,15 @@ pub struct InvestmentResponse {
     /// that can be unbonded (to avoid needless staking tx)
     pub min_withdrawal: Uint128,
 }
+
+// might need to provide this in order to return claims info
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct CurveInfoResponse {
+    // how many reserve tokens have been received
+    pub reserve: Uint128,
+    // how many supply tokens have been issued
+    pub supply: Uint128,
+    pub spot_price: Decimal,
+    pub reserve_denom: String,
+    pub claims: Uint128,
+}

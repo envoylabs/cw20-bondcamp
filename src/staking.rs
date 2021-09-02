@@ -7,7 +7,7 @@ use crate::bonding::{execute_burn, execute_mint};
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
 use crate::query::InvestmentResponse;
-use crate::state::{Supply, CLAIMS, INVESTMENT, TOTAL_SUPPLY};
+use crate::state::{CurveState, CLAIMS, CURVE_STATE, INVESTMENT};
 
 const FALLBACK_RATIO: Decimal = Decimal::one();
 
@@ -32,10 +32,10 @@ fn get_bonded(querier: &QuerierWrapper, contract: &Addr) -> Result<Uint128, Cont
     })
 }
 
-fn assert_bonds(supply: &Supply, bonded: Uint128) -> Result<(), ContractError> {
-    if supply.bonded != bonded {
+fn assert_bonds(curve_state: &CurveState, bonded: Uint128) -> Result<(), ContractError> {
+    if curve_state.reserve != bonded {
         Err(ContractError::BondedMismatch {
-            stored: supply.bonded,
+            stored: curve_state.reserve,
             queried: bonded,
         })
     } else {
@@ -59,19 +59,19 @@ pub fn bond(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, Cont
     let bonded = get_bonded(&deps.querier, &env.contract.address)?;
 
     // calculate to_mint and update total supply
-    let mut supply = TOTAL_SUPPLY.load(deps.storage)?;
+    let mut curve_state = CURVE_STATE.load(deps.storage)?;
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
     // have expensive queries everywhere
-    assert_bonds(&supply, bonded)?;
-    let to_mint = if supply.issued.is_zero() || bonded.is_zero() {
+    assert_bonds(&curve_state, bonded)?;
+    let to_mint = if curve_state.supply.is_zero() || bonded.is_zero() {
         FALLBACK_RATIO * payment.amount
     } else {
-        payment.amount.multiply_ratio(supply.issued, bonded)
+        payment.amount.multiply_ratio(curve_state.supply, bonded)
     };
-    supply.bonded = bonded + payment.amount;
-    supply.issued += to_mint;
-    TOTAL_SUPPLY.save(deps.storage, &supply)?;
+    curve_state.reserve = bonded + payment.amount;
+    curve_state.supply += to_mint;
+    CURVE_STATE.save(deps.storage, &curve_state)?;
 
     // call into cw20-base to mint the token, call as self as no one else is allowed
     let sub_info = MessageInfo {
@@ -131,21 +131,21 @@ pub fn unbond(
     // bonded is the total number of tokens we have delegated from this address
     let bonded = get_bonded(&deps.querier, &env.contract.address)?;
 
-    // calculate how many native tokens this is worth and update supply
+    // calculate how many native tokens this is worth and update curve state
     let remainder = amount.checked_sub(tax).map_err(StdError::overflow)?;
-    let mut supply = TOTAL_SUPPLY.load(deps.storage)?;
+    let mut curve_state = CURVE_STATE.load(deps.storage)?;
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
     // have expensive queries everywhere
-    assert_bonds(&supply, bonded)?;
-    let unbond = remainder.multiply_ratio(bonded, supply.issued);
-    supply.bonded = bonded.checked_sub(unbond).map_err(StdError::overflow)?;
-    supply.issued = supply
-        .issued
+    assert_bonds(&curve_state, bonded)?;
+    let unbond = remainder.multiply_ratio(bonded, curve_state.supply);
+    curve_state.reserve = bonded.checked_sub(unbond).map_err(StdError::overflow)?;
+    curve_state.supply = curve_state
+        .supply
         .checked_sub(remainder)
         .map_err(StdError::overflow)?;
-    supply.claims += unbond;
-    TOTAL_SUPPLY.save(deps.storage, &supply)?;
+    curve_state.claims += unbond;
+    CURVE_STATE.save(deps.storage, &curve_state)?;
 
     CLAIMS.create_claim(
         deps.storage,
@@ -186,9 +186,9 @@ pub fn claim(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, Con
     }
 
     // update total supply (lower claim)
-    TOTAL_SUPPLY.update(deps.storage, |mut supply| -> StdResult<_> {
-        supply.claims = supply.claims.checked_sub(to_send)?;
-        Ok(supply)
+    CURVE_STATE.update(deps.storage, |mut curve_state| -> StdResult<_> {
+        curve_state.claims = curve_state.claims.checked_sub(to_send)?;
+        Ok(curve_state)
     })?;
 
     // transfer tokens to the sender
@@ -243,12 +243,12 @@ pub fn _bond_all_tokens(
 
     // we deduct pending claims from our account balance before reinvesting.
     // if there is not enough funds, we just return a no-op
-    match TOTAL_SUPPLY.update(deps.storage, |mut supply| -> StdResult<_> {
-        balance.amount = balance.amount.checked_sub(supply.claims)?;
+    match CURVE_STATE.update(deps.storage, |mut curve_state| -> StdResult<_> {
+        balance.amount = balance.amount.checked_sub(curve_state.claims)?;
         // this just triggers the "no op" case if we don't have min_withdrawal left to reinvest
         balance.amount.checked_sub(invest.min_withdrawal)?;
-        supply.bonded += balance.amount;
-        Ok(supply)
+        curve_state.reserve += balance.amount;
+        Ok(curve_state)
     }) {
         Ok(_) => {}
         // if it is below the minimum, we do a no-op (do not revert other state from withdrawal)
@@ -269,19 +269,19 @@ pub fn _bond_all_tokens(
 
 pub fn query_investment(deps: Deps) -> StdResult<InvestmentResponse> {
     let invest = INVESTMENT.load(deps.storage)?;
-    let supply = TOTAL_SUPPLY.load(deps.storage)?;
+    let curve_state = CURVE_STATE.load(deps.storage)?;
 
     let res = InvestmentResponse {
         owner: invest.owner.to_string(),
         exit_tax: invest.exit_tax,
         validator: invest.validator,
         min_withdrawal: invest.min_withdrawal,
-        token_supply: supply.issued,
-        staked_tokens: coin(supply.bonded.u128(), &invest.bond_denom),
-        nominal_value: if supply.issued.is_zero() {
+        token_supply: curve_state.supply,
+        staked_tokens: coin(curve_state.reserve.u128(), &invest.bond_denom),
+        nominal_value: if curve_state.supply.is_zero() {
             FALLBACK_RATIO
         } else {
-            Decimal::from_ratio(supply.bonded, supply.issued)
+            Decimal::from_ratio(curve_state.reserve, curve_state.supply)
         },
     };
     Ok(res)

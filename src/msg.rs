@@ -1,10 +1,10 @@
-use cw20_bonding::msg::CurveType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use cosmwasm_std::{Binary, Decimal, Uint128};
 use cw0::Duration;
 use cw20::Expiration;
+pub use cw20_bonding::msg::CurveType;
 pub use cw_controllers::ClaimsResponse;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
