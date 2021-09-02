@@ -77,7 +77,7 @@ pub struct InvestmentInfo {
     pub min_withdrawal: Uint128,
 }
 
-/// Supply is dynamic and tracks the current supply of staked and ERC20 tokens.
+/// Supply is dynamic and tracks the current supply of staked and CW20 tokens.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, Default)]
 pub struct Supply {
     /// issued is how many derivative tokens this contract has issued
