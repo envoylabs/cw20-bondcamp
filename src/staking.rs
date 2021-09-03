@@ -8,9 +8,9 @@ use crate::bonding::{execute_burn, execute_mint};
 use crate::error::ContractError;
 use crate::msg::ExecuteMsg;
 use crate::query::InvestmentResponse;
-use crate::state::{CurveState, CLAIMS, CURVE_STATE, INVESTMENT};
+use crate::state::{CurveState, CLAIMS, CURVE_STATE, CURVE_TYPE, INVESTMENT};
 
-const FALLBACK_RATIO: Decimal = Decimal::one();
+// const FALLBACK_RATIO: Decimal = Decimal::one();
 
 // get_bonded returns the total amount of delegations from contract
 // it ensures they are all the same denom
@@ -53,6 +53,7 @@ pub fn bond(
     // ensure we have the proper denom
     let invest = INVESTMENT.load(deps.storage)?;
     // payment finds the proper coin (or throws an error)
+    println!("{:?}", info);
     let payment = info
         .funds
         .iter()
@@ -64,8 +65,18 @@ pub fn bond(
     // bonded is the total number of tokens we have delegated from this address
     let bonded = get_bonded(&deps.querier, &env.contract.address)?;
 
+    println!("{:?}", "bonded");
+    println!("{:?}", bonded);
+    println!(
+        "{:?}",
+        &deps.querier.query_all_delegations(&env.contract.address)
+    );
+
     // calculate to_mint and update total supply
     let mut curve_state = CURVE_STATE.load(deps.storage)?;
+
+    println!("{:?}", "curve_state");
+    println!("{:?}", curve_state);
 
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
@@ -86,14 +97,19 @@ pub fn bond(
     // let payment: Uint128 = must_pay(&info, &state.reserve_denom)?;
 
     let curve = curve_fn(curve_state.decimals);
+    println!("{:?}", payment.amount);
     curve_state.reserve += payment.amount;
+    println!("{:?}", curve_state.reserve);
 
     // curve.supply() calculates native -> CW20
     let new_supply = curve.supply(curve_state.reserve);
+    println!("{:?}", curve_state.reserve);
+    println!("{:?}", new_supply);
     let minted = new_supply
         .checked_sub(curve_state.supply)
         .map_err(StdError::overflow)?;
     curve_state.supply = new_supply;
+    println!("{:?}", new_supply);
     CURVE_STATE.save(deps.storage, &curve_state)?;
 
     // call into cw20-base to mint the token, call as self as no one else is allowed
@@ -101,6 +117,7 @@ pub fn bond(
         sender: env.contract.address.clone(),
         funds: vec![],
     };
+    println!("{:?}", minted);
     execute_mint(deps, env, sub_info, info.sender.to_string(), minted)?;
 
     // bond them to the validator
@@ -314,6 +331,11 @@ pub fn query_investment(deps: Deps) -> StdResult<InvestmentResponse> {
     let invest = INVESTMENT.load(deps.storage)?;
     let curve_state = CURVE_STATE.load(deps.storage)?;
 
+    let curve_type = CURVE_TYPE.load(deps.storage)?;
+    let curve_fn = curve_type.to_curve_fn();
+    let curve = curve_fn(curve_state.decimals);
+    let spot_price = curve.spot_price(curve_state.supply);
+
     let res = InvestmentResponse {
         owner: invest.owner.to_string(),
         exit_tax: invest.exit_tax,
@@ -321,11 +343,7 @@ pub fn query_investment(deps: Deps) -> StdResult<InvestmentResponse> {
         min_withdrawal: invest.min_withdrawal,
         token_supply: curve_state.supply,
         staked_tokens: coin(curve_state.reserve.u128(), &invest.bond_denom),
-        nominal_value: if curve_state.supply.is_zero() {
-            FALLBACK_RATIO
-        } else {
-            Decimal::from_ratio(curve_state.reserve, curve_state.supply)
-        },
+        nominal_value: spot_price,
     };
     Ok(res)
 }

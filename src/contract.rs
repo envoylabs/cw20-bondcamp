@@ -75,23 +75,21 @@ pub fn instantiate(
     TOKEN_INFO_WITH_META.save(deps.storage, &data)?;
 
     // marshal data for investment info
-    let denom = deps.querier.query_bonded_denom()?;
+    // this denom should be the reserve denom
+    let reserve_denom = deps.querier.query_bonded_denom()?;
+
     let investment_info = InvestmentInfo {
         owner: info.sender,
         exit_tax: msg.staking_params.exit_tax,
         unbonding_period: msg.staking_params.unbonding_period,
-        bond_denom: denom,
+        bond_denom: String::from(&reserve_denom),
         validator: msg.staking_params.validator,
         min_withdrawal: msg.staking_params.min_withdrawal,
     };
     INVESTMENT.save(deps.storage, &investment_info)?;
 
-    // set supply to 0
-    // let supply = Supply::default();
-    // TOTAL_SUPPLY.save(deps.storage, &supply)?;
-
     let places = DecimalPlaces::new(msg.decimals, msg.reserve_decimals);
-    let supply = CurveState::new(msg.reserve_denom, places);
+    let supply = CurveState::new(reserve_denom, places);
     CURVE_STATE.save(deps.storage, &supply)?;
 
     CURVE_TYPE.save(deps.storage, &msg.curve_type)?;
@@ -124,10 +122,9 @@ pub fn do_execute(
     curve_fn: CurveFn,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Buy {} => execute_buy(deps, env, info, curve_fn),
-
         // we override these from cw20
-        // they are defined below
+        // they are defined in bonding.rs
+        ExecuteMsg::Buy {} => execute_buy(deps, env, info, curve_fn),
         ExecuteMsg::Burn { amount } => Ok(execute_sell(deps, env, info, curve_fn, amount)?),
         ExecuteMsg::BurnFrom { owner, amount } => {
             Ok(execute_sell_from(deps, env, info, curve_fn, owner, amount)?)
@@ -275,7 +272,8 @@ mod tests {
     };
     use cw0::{Duration, PaymentError, DAY, HOUR};
 
-    const DENOM: &str = "satoshi";
+    // DENOM = native token
+    const DENOM: &str = "ustake";
     const CREATOR: &str = "creator";
     const INVESTOR: &str = "investor";
     const BUYER: &str = "buyer";
@@ -300,7 +298,7 @@ mod tests {
             name: "Windscale2Coin".to_string(),
             symbol: "WIND".to_string(),
             decimals,
-            reserve_denom: DENOM.to_string(),
+            // reserve_denom: DENOM.to_string(),
             reserve_decimals,
             curve_type,
             staking_params: StakingParams {
@@ -651,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn proper_staking_instantiation() {
+    fn staking_proper_staking_instantiation() {
         let mut deps = mock_dependencies(&[]);
         deps.querier.update_staking(
             "ustake",
@@ -679,7 +677,7 @@ mod tests {
             name: "Windscale2Coin".to_string(),
             symbol: "WIND".to_string(),
             decimals: 2,
-            reserve_denom: DENOM.to_string(),
+            // reserve_denom: DENOM.to_string(),
             reserve_decimals: 8,
             asset_uri: None,
             curve_type: curve_type.clone(),
@@ -717,11 +715,13 @@ mod tests {
 
         assert_eq!(invest.token_supply, Uint128::zero());
         assert_eq!(invest.staked_tokens, coin(0, "ustake"));
-        assert_eq!(invest.nominal_value, Decimal::one());
+        // think this should be zero as nothing is staked yet
+        assert_eq!(invest.nominal_value, Decimal::zero());
+        // assert_eq!(invest.nominal_value, Decimal::one());
     }
 
     #[test]
-    fn instantiation_with_missing_validator() {
+    fn staking_instantiation_with_missing_validator() {
         let mut deps = mock_dependencies(&[]);
         deps.querier
             .update_staking("ustake", &[sample_validator("john")], &[]);
@@ -742,7 +742,7 @@ mod tests {
             name: "Windscale2Coin".to_string(),
             symbol: "WIND".to_string(),
             decimals: 2,
-            reserve_denom: DENOM.to_string(),
+            // reserve_denom: DENOM.to_string(),
             reserve_decimals: 8,
             asset_uri: None,
             curve_type: curve_type.clone(),
@@ -766,14 +766,19 @@ mod tests {
     }
 
     #[test]
-    fn bonding_issues_tokens() {
+    fn staking_bonding_issues_tokens() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
+        // deps.querier
+        //     .update_staking("ustake", &[sample_validator(DEFAULT_VALIDATOR)], &[]);
 
-        let curve_type = CurveType::SquareRoot {
+        let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
             scale: 1,
         };
+
+        //let curve_fn = curve_type.to_curve_fn();
+
         let creator = String::from("creator");
         let instantiate_msg = default_instantiate(
             Some("https://f4.bcbits.com/img/a0113459728_10.jpg".to_string()),
@@ -789,10 +794,30 @@ mod tests {
         let res = instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
         assert_eq!(0, res.messages.len());
 
-        // let's bond some tokens now
+        // sense check
+        let loaded_curve_type = CURVE_TYPE.load(&deps.storage).unwrap();
+        //let curve_fn = loaded_curve_type.to_curve_fn();
+        assert_eq!(curve_type, loaded_curve_type);
+
+        // succeeds with proper token (5 BTC = 5*10^8 satoshi)
         let bob = String::from("bob");
         let bond_msg = ExecuteMsg::Bond {};
-        let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
+        let info = mock_info(
+            &bob,
+            &[
+                coin(1000, "this-one-is-ignored"),
+                coin(500_000_000, "ustake"),
+            ],
+        );
+
+        // // bob got 1000 EPOXY (10.00)
+        // assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(1000));
+        // assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128::new(0));
+
+        // // let's bond some tokens now
+        // let bob = String::from("bob");
+        // let bond_msg = ExecuteMsg::Bond {};
+        // let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
 
         // try to bond and make sure we trigger delegation
         let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
@@ -801,7 +826,7 @@ mod tests {
         match &delegate.msg {
             CosmosMsg::Staking(StakingMsg::Delegate { validator, amount }) => {
                 assert_eq!(validator.as_str(), DEFAULT_VALIDATOR);
-                assert_eq!(amount, &coin(1000, "ustake"));
+                assert_eq!(amount, &coin(500_000_000, "ustake"));
             }
             _ => panic!("Unexpected message: {:?}", delegate),
         }
@@ -809,25 +834,55 @@ mod tests {
         // bob got 1000 DRV for 1000 stake at a 1.0 ratio
         assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
 
+        // update delegations total
+        set_delegation(&mut deps.querier, 500_000_000, "ustake");
+
+        // time for alice
+        // needs more to make it work
+        let alice = String::from("alice");
+        let bond_msg = ExecuteMsg::Bond {};
+        let info = mock_info(
+            &alice,
+            &[
+                coin(2000, "this-one-is-ignored"),
+                coin(1_500_000_000, "ustake"),
+            ],
+        );
+
+        // try to bond and make sure we trigger delegation
+        let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
+        assert_eq!(1, res.messages.len());
+        let delegate = &res.messages[0];
+        match &delegate.msg {
+            CosmosMsg::Staking(StakingMsg::Delegate { validator, amount }) => {
+                assert_eq!(validator.as_str(), DEFAULT_VALIDATOR);
+                assert_eq!(amount, &coin(1_500_000_000, "ustake"));
+            }
+            _ => panic!("Unexpected message: {:?}", delegate),
+        }
+
+        // alice got 1000 DRV for 1000 stake at a 1.0 ratio
+        assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::new(1000));
+
         // investment info correct (updated supply)
         let invest = query_investment(deps.as_ref()).unwrap();
-        assert_eq!(invest.token_supply, Uint128::new(1000));
-        assert_eq!(invest.staked_tokens, coin(1000, "ustake"));
-        assert_eq!(invest.nominal_value, Decimal::one());
+        assert_eq!(invest.token_supply, Uint128::new(2000));
+        assert_eq!(invest.staked_tokens, coin(2_000_000_000, "ustake"));
+        assert_eq!(invest.nominal_value, Decimal::permille(2_000));
 
         // token info also properly updated
         let token = query_token_info_with_meta(deps.as_ref()).unwrap();
-        assert_eq!(token.token_info_response.total_supply, Uint128::new(1000));
+        assert_eq!(token.token_info_response.total_supply, Uint128::new(2000));
     }
 
     #[test]
-    fn rebonding_changes_pricing() {
+    fn staking_rebonding_changes_pricing() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
         let curve_type = CurveType::SquareRoot {
             slope: Uint128::new(1),
-            scale: 1,
+            scale: 2,
         };
 
         let creator = String::from("creator");
@@ -880,6 +935,7 @@ mod tests {
         assert_eq!(1, res.messages.len());
 
         // update the querier with new bond
+        // wait, shouldn't this be 4500?
         set_delegation(&mut deps.querier, 3000, "ustake");
 
         // alice should have gotten 2000 DRV for the 3000 stake, keeping the ratio at 1.5
@@ -892,13 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn bonding_fails_with_wrong_denom() {
+    fn staking_bonding_fails_with_wrong_denom() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
         let curve_type = CurveType::SquareRoot {
             slope: Uint128::new(1),
-            scale: 1,
+            scale: 2,
         };
 
         let creator = String::from("creator");
@@ -932,13 +988,13 @@ mod tests {
     }
 
     #[test]
-    fn unbonding_maintains_price_ratio() {
+    fn staking_unbonding_maintains_price_ratio() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
         let curve_type = CurveType::SquareRoot {
             slope: Uint128::new(1),
-            scale: 1,
+            scale: 2,
         };
 
         let creator = String::from("creator");
@@ -1038,13 +1094,13 @@ mod tests {
     }
 
     #[test]
-    fn claims_paid_out_properly() {
+    fn staking_claims_paid_out_properly() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
         let curve_type = CurveType::SquareRoot {
             slope: Uint128::new(1),
-            scale: 1,
+            scale: 2,
         };
 
         // create contract
@@ -1233,5 +1289,97 @@ mod tests {
                 amount: coins(1_500, DENOM),
             })
         );
+    }
+
+    #[test]
+    fn staking_cw20_imports_work() {
+        let mut deps = mock_dependencies(&[]);
+        set_validator(&mut deps.querier);
+
+        // set the actors... bob stakes, sends coins to carl, and gives allowance to alice
+        let bob = String::from("bob");
+        let alice = String::from("alice");
+        let carl = String::from("carl");
+
+        let curve_type = CurveType::Linear {
+            slope: Uint128::new(1),
+            scale: 1,
+        };
+
+        let creator = String::from("creator");
+        let instantiate_msg = default_instantiate(
+            Some("https://f4.bcbits.com/img/a0113459728_10.jpg".to_string()),
+            2,
+            8,
+            curve_type.clone(),
+            2,
+            50,
+        );
+
+        let info = mock_info(&creator, &[]);
+        instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
+
+        // bond some tokens to create a balance
+        let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
+        execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Bond {}).unwrap();
+
+        // bob got 1000 DRV for 1000 stake at a 1.0 ratio
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
+
+        // send coins to carl
+        let bob_info = mock_info(&bob, &[]);
+        let transfer = ExecuteMsg::Transfer {
+            recipient: carl.clone(),
+            amount: Uint128::new(200),
+        };
+        execute(deps.as_mut(), mock_env(), bob_info.clone(), transfer).unwrap();
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(800));
+        assert_eq!(get_balance(deps.as_ref(), &carl), Uint128::new(200));
+
+        // allow alice
+        let allow = ExecuteMsg::IncreaseAllowance {
+            spender: alice.clone(),
+            amount: Uint128::new(350),
+            expires: None,
+        };
+        execute(deps.as_mut(), mock_env(), bob_info.clone(), allow).unwrap();
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(800));
+        assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::zero());
+        assert_eq!(
+            query_allowance(deps.as_ref(), bob.clone(), alice.clone())
+                .unwrap()
+                .allowance,
+            Uint128::new(350)
+        );
+
+        // alice takes some for herself
+        let self_pay = ExecuteMsg::TransferFrom {
+            owner: bob.clone(),
+            recipient: alice.clone(),
+            amount: Uint128::new(250),
+        };
+        let alice_info = mock_info(&alice, &[]);
+        execute(deps.as_mut(), mock_env(), alice_info, self_pay).unwrap();
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(550));
+        assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::new(250));
+        assert_eq!(
+            query_allowance(deps.as_ref(), bob.clone(), alice)
+                .unwrap()
+                .allowance,
+            Uint128::new(100)
+        );
+
+        // burn some, but not too much
+        let burn_too_much = ExecuteMsg::Burn {
+            amount: Uint128::new(1000),
+        };
+        let failed = execute(deps.as_mut(), mock_env(), bob_info.clone(), burn_too_much);
+        assert!(failed.is_err());
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(550));
+        let burn = ExecuteMsg::Burn {
+            amount: Uint128::new(130),
+        };
+        execute(deps.as_mut(), mock_env(), bob_info, burn).unwrap();
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(420));
     }
 }
