@@ -810,15 +810,6 @@ mod tests {
             ],
         );
 
-        // // bob got 1000 EPOXY (10.00)
-        // assert_eq!(get_balance(deps.as_ref(), INVESTOR), Uint128::new(1000));
-        // assert_eq!(get_balance(deps.as_ref(), BUYER), Uint128::new(0));
-
-        // // let's bond some tokens now
-        // let bob = String::from("bob");
-        // let bond_msg = ExecuteMsg::Bond {};
-        // let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
-
         // try to bond and make sure we trigger delegation
         let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
         assert_eq!(1, res.messages.len());
@@ -831,7 +822,7 @@ mod tests {
             _ => panic!("Unexpected message: {:?}", delegate),
         }
 
-        // bob got 1000 DRV for 1000 stake at a 1.0 ratio
+        // bob got 1000 derived tokens
         assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
 
         // update delegations total
@@ -861,7 +852,7 @@ mod tests {
             _ => panic!("Unexpected message: {:?}", delegate),
         }
 
-        // alice got 1000 DRV for 1000 stake at a 1.0 ratio
+        // alice got 1000 derived tokens for a larger initial
         assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::new(1000));
 
         // investment info correct (updated supply)
@@ -880,9 +871,9 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
-        let curve_type = CurveType::SquareRoot {
+        let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
-            scale: 2,
+            scale: 1,
         };
 
         let creator = String::from("creator");
@@ -903,27 +894,30 @@ mod tests {
         // let's bond some tokens now
         let bob = String::from("bob");
         let bond_msg = ExecuteMsg::Bond {};
-        let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
+        let info = mock_info(&bob, &[coin(10, "random"), coin(5_000_000, "ustake")]);
         let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
         assert_eq!(1, res.messages.len());
 
+        // check bob got 100 derived tokens
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(100));
+
         // update the querier with new bond
-        set_delegation(&mut deps.querier, 1000, "ustake");
+        set_delegation(&mut deps.querier, 5_000_000, "ustake");
 
         // fake a reinvestment (this must be sent by the contract itself)
         let rebond_msg = ExecuteMsg::_BondAllTokens {};
         let info = mock_info(MOCK_CONTRACT_ADDR, &[]);
         deps.querier
-            .update_balance(MOCK_CONTRACT_ADDR, coins(500, "ustake"));
+            .update_balance(MOCK_CONTRACT_ADDR, coins(500_000, "ustake"));
         let _ = execute(deps.as_mut(), mock_env(), info, rebond_msg).unwrap();
 
         // update the querier with new bond
-        set_delegation(&mut deps.querier, 1500, "ustake");
+        set_delegation(&mut deps.querier, 5_500_000, "ustake");
 
-        // we should now see 1000 issues and 1500 bonded (and a price of 1.5)
+        // we should now see 110 issued and 5_500_000 bonded (and a price of 1.5)
         let invest = query_investment(deps.as_ref()).unwrap();
-        assert_eq!(invest.token_supply, Uint128::new(1000));
-        assert_eq!(invest.staked_tokens, coin(1500, "ustake"));
+        assert_eq!(invest.token_supply, Uint128::new(110));
+        assert_eq!(invest.staked_tokens, coin(5_500_000, "ustake"));
         let ratio = Decimal::from_str("1.5").unwrap();
         assert_eq!(invest.nominal_value, ratio);
 
