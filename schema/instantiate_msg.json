@@ -10,7 +10,6 @@
     "external_permalink_uri",
     "name",
     "reserve_decimals",
-    "reserve_denom",
     "staking_params",
     "symbol",
     "work"
@@ -54,14 +53,10 @@
       "type": "string"
     },
     "reserve_decimals": {
-      "description": "number of decimal places for the reserve token, needed for proper curve math. Same format as decimals above, eg. if it is uatom, where 1 unit is 10^-6 ATOM, use 6 here",
+      "description": "this is the reserve token denom (only support native for now) number of decimal places for the reserve token, needed for proper curve math. Same format as decimals above, eg. if it is uatom, where 1 unit is 10^-6 ATOM, use 6 here",
       "type": "integer",
       "format": "uint8",
       "minimum": 0.0
-    },
-    "reserve_denom": {
-      "description": "this is the reserve token denom (only support native for now)",
-      "type": "string"
     },
     "staking_params": {
       "description": "put all the staking params into a basket",

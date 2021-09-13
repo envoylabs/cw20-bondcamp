@@ -1,5 +1,5 @@
 use cosmwasm_std::{
-    coin, to_binary, Addr, BankMsg, Decimal, Deps, DepsMut, DistributionMsg, Env, MessageInfo,
+    coin, to_binary, Addr, BankMsg, Deps, DepsMut, DistributionMsg, Env, MessageInfo,
     QuerierWrapper, Response, StakingMsg, StdError, StdResult, Uint128, WasmMsg,
 };
 use cw20_bonding::msg::CurveFn;
@@ -53,7 +53,6 @@ pub fn bond(
     // ensure we have the proper denom
     let invest = INVESTMENT.load(deps.storage)?;
     // payment finds the proper coin (or throws an error)
-    println!("{:?}", info);
     let payment = info
         .funds
         .iter()
@@ -65,51 +64,25 @@ pub fn bond(
     // bonded is the total number of tokens we have delegated from this address
     let bonded = get_bonded(&deps.querier, &env.contract.address)?;
 
-    println!("{:?}", "bonded");
-    println!("{:?}", bonded);
-    println!(
-        "{:?}",
-        &deps.querier.query_all_delegations(&env.contract.address)
-    );
-
     // calculate to_mint and update total supply
     let mut curve_state = CURVE_STATE.load(deps.storage)?;
-
-    println!("{:?}", "curve_state");
-    println!("{:?}", curve_state);
 
     // TODO: this is just a safety assertion - do we keep it, or remove caching?
     // in the end supply is just there to cache the (expected) results of get_bonded() so we don't
     // have expensive queries everywhere
     assert_bonds(&curve_state, bonded)?;
 
-    // this logic should be the same as execute buy
-    // let to_mint = if curve_state.supply.is_zero() || bonded.is_zero() {
-    //     FALLBACK_RATIO * payment.amount
-    // } else {
-    //     payment.amount.multiply_ratio(curve_state.supply, bonded)
-    // };
-    // curve_state.reserve = bonded + payment.amount;
-    // curve_state.supply += to_mint;
-    // CURVE_STATE.save(deps.storage, &curve_state)?;
-    // end of the bit that needs changing
-
-    // let payment: Uint128 = must_pay(&info, &state.reserve_denom)?;
-
     let curve = curve_fn(curve_state.decimals);
-    println!("{:?}", payment.amount);
     curve_state.reserve += payment.amount;
-    println!("{:?}", curve_state.reserve);
 
     // curve.supply() calculates native -> CW20
     let new_supply = curve.supply(curve_state.reserve);
-    println!("{:?}", curve_state.reserve);
-    println!("{:?}", new_supply);
+
     let minted = new_supply
         .checked_sub(curve_state.supply)
         .map_err(StdError::overflow)?;
     curve_state.supply = new_supply;
-    println!("{:?}", new_supply);
+
     CURVE_STATE.save(deps.storage, &curve_state)?;
 
     // call into cw20-base to mint the token, call as self as no one else is allowed
@@ -117,7 +90,7 @@ pub fn bond(
         sender: env.contract.address.clone(),
         funds: vec![],
     };
-    println!("{:?}", minted);
+
     execute_mint(deps, env, sub_info, info.sender.to_string(), minted)?;
 
     // bond them to the validator
@@ -285,6 +258,7 @@ pub fn _bond_all_tokens(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
+    curve_fn: CurveFn,
 ) -> Result<Response, ContractError> {
     // this is just meant as a call-back to ourself
     if info.sender != env.contract.address {
@@ -308,6 +282,13 @@ pub fn _bond_all_tokens(
         // need coffee and a full night of sleep cos moderately certain
         // that this ain't right like
         curve_state.reserve += balance.amount;
+        // now let's mint the derived tokens
+        // off of this reward
+        let curve = curve_fn(curve_state.decimals);
+        // reserve -> token and increment
+        let new_supply = curve.supply(curve_state.reserve);
+        curve_state.supply = new_supply;
+
         Ok(curve_state)
     }) {
         Ok(_) => {}

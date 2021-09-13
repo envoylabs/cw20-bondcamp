@@ -135,7 +135,7 @@ pub fn do_execute(
         ExecuteMsg::Unbond { amount } => unbond(deps, env, info, curve_fn, amount),
         ExecuteMsg::Claim {} => claim(deps, env, info),
         ExecuteMsg::Reinvest {} => reinvest(deps, env, info),
-        ExecuteMsg::_BondAllTokens {} => _bond_all_tokens(deps, env, info),
+        ExecuteMsg::_BondAllTokens {} => _bond_all_tokens(deps, env, info, curve_fn),
 
         // these all come from cw20-base to implement the cw20 standard
         ExecuteMsg::Transfer { recipient, amount } => {
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn staking_proper_staking_instantiation() {
+    fn staking_tests_proper_staking_instantiation() {
         let mut deps = mock_dependencies(&[]);
         deps.querier.update_staking(
             "ustake",
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn staking_instantiation_with_missing_validator() {
+    fn staking_tests_instantiation_with_missing_validator() {
         let mut deps = mock_dependencies(&[]);
         deps.querier
             .update_staking("ustake", &[sample_validator("john")], &[]);
@@ -766,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn staking_bonding_issues_tokens() {
+    fn staking_tests_bonding_issues_tokens() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
         // deps.querier
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn staking_rebonding_changes_pricing() {
+    fn staking_tests_rebonding_changes_pricing() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
@@ -914,41 +914,42 @@ mod tests {
         // update the querier with new bond
         set_delegation(&mut deps.querier, 5_500_000, "ustake");
 
-        // we should now see 110 issued and 5_500_000 bonded (and a price of 1.5)
+        // we should now see 104 issued and 5_500_000 bonded (and a price of 0.104)
         let invest = query_investment(deps.as_ref()).unwrap();
-        assert_eq!(invest.token_supply, Uint128::new(110));
+        assert_eq!(invest.token_supply, Uint128::new(104));
         assert_eq!(invest.staked_tokens, coin(5_500_000, "ustake"));
-        let ratio = Decimal::from_str("1.5").unwrap();
-        assert_eq!(invest.nominal_value, ratio);
+        let spot_price = Decimal::from_str("0.104").unwrap();
+        assert_eq!(invest.nominal_value, spot_price);
 
-        // we bond some other tokens and get a different issuance price (maintaining the ratio)
+        // we bond some other tokens and get a different issuance price
         let alice = String::from("alice");
         let bond_msg = ExecuteMsg::Bond {};
-        let info = mock_info(&alice, &[coin(3000, "ustake")]);
+        let info = mock_info(&alice, &[coin(1_500_000_000, "ustake")]);
         let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
         assert_eq!(1, res.messages.len());
 
         // update the querier with new bond
-        // wait, shouldn't this be 4500?
-        set_delegation(&mut deps.querier, 3000, "ustake");
+        // i.e. alice + bob
+        set_delegation(&mut deps.querier, 1_505_500_000, "ustake");
 
-        // alice should have gotten 2000 DRV for the 3000 stake, keeping the ratio at 1.5
-        assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::new(2000));
+        // alice should have gotten over 1k but less than 2k
+        assert_eq!(get_balance(deps.as_ref(), &alice), Uint128::new(1631));
 
+        // 1631 + bob's 104
         let invest = query_investment(deps.as_ref()).unwrap();
-        assert_eq!(invest.token_supply, Uint128::new(3000));
-        assert_eq!(invest.staked_tokens, coin(4500, "ustake"));
-        assert_eq!(invest.nominal_value, ratio);
+        assert_eq!(invest.token_supply, Uint128::new(1735));
+        assert_eq!(invest.staked_tokens, coin(1_505_500_000, "ustake"));
+        assert_eq!(invest.nominal_value, Decimal::from_str("1.735").unwrap());
     }
 
     #[test]
-    fn staking_bonding_fails_with_wrong_denom() {
+    fn staking_tests_bonding_fails_with_wrong_denom() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
-        let curve_type = CurveType::SquareRoot {
+        let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
-            scale: 2,
+            scale: 1,
         };
 
         let creator = String::from("creator");
@@ -982,13 +983,13 @@ mod tests {
     }
 
     #[test]
-    fn staking_unbonding_maintains_price_ratio() {
+    fn staking_tests_unbonding_changes_price_on_curve() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
-        let curve_type = CurveType::SquareRoot {
+        let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
-            scale: 2,
+            scale: 1,
         };
 
         let creator = String::from("creator");
@@ -1009,28 +1010,37 @@ mod tests {
         // let's bond some tokens now
         let bob = String::from("bob");
         let bond_msg = ExecuteMsg::Bond {};
-        let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
+        let info = mock_info(
+            &bob,
+            &[
+                coin(1000, "this-one-is-ignored"),
+                coin(500_000_000, "ustake"),
+            ],
+        );
         let res = execute(deps.as_mut(), mock_env(), info, bond_msg).unwrap();
         assert_eq!(1, res.messages.len());
 
         // update the querier with new bond
-        set_delegation(&mut deps.querier, 1000, "ustake");
+        set_delegation(&mut deps.querier, 500_000_000, "ustake");
+
+        // check bob's balance is 1k
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
 
         // fake a reinvestment (this must be sent by the contract itself)
-        // after this, we see 1000 issues and 1500 bonded (and a price of 1.5)
+        // after this we have 5_000_000 issued and 5_500_000 bonded
         let rebond_msg = ExecuteMsg::_BondAllTokens {};
         let info = mock_info(MOCK_CONTRACT_ADDR, &[]);
         deps.querier
-            .update_balance(MOCK_CONTRACT_ADDR, coins(500, "ustake"));
+            .update_balance(MOCK_CONTRACT_ADDR, coins(500_000, "ustake"));
         let _ = execute(deps.as_mut(), mock_env(), info, rebond_msg).unwrap();
 
         // update the querier with new bond, lower balance
-        set_delegation(&mut deps.querier, 1500, "ustake");
+        set_delegation(&mut deps.querier, 500_500_000, "ustake");
         deps.querier.update_balance(MOCK_CONTRACT_ADDR, vec![]);
 
         // creator now tries to unbond these tokens - this must fail
         let unbond_msg = ExecuteMsg::Unbond {
-            amount: Uint128::new(600),
+            amount: Uint128::new(500_000),
         };
         let info = mock_info(&creator, &[]);
         let err = execute(deps.as_mut(), mock_env(), info, unbond_msg).unwrap_err();
@@ -1039,19 +1049,19 @@ mod tests {
             ContractError::Std(StdError::overflow(OverflowError::new(
                 OverflowOperation::Sub,
                 0,
-                600
+                500_000
             )))
         );
 
-        // bob unbonds 600 tokens at 10% tax...
-        // 60 are taken and send to the owner
-        // 540 are unbonded in exchange for 540 * 1.5 = 810 native tokens
+        // bob unbonds 100 tokens at 10% tax...
+        // 10 are taken and send to the owner
+        // 90 are unbonded in exchange for native tokens
         let unbond_msg = ExecuteMsg::Unbond {
-            amount: Uint128::new(600),
+            amount: Uint128::new(100),
         };
-        let owner_cut = Uint128::new(60);
-        let bobs_claim = Uint128::new(810);
-        let bobs_balance = Uint128::new(400);
+        let owner_cut = Uint128::new(10);
+        let bobs_claim = Uint128::new(86_450_000);
+        let bobs_balance = Uint128::new(900);
         let env = mock_env();
         let info = mock_info(&bob, &[]);
         let res = execute(deps.as_mut(), env.clone(), info, unbond_msg).unwrap();
@@ -1066,7 +1076,8 @@ mod tests {
         }
 
         // update the querier with new bond, lower balance
-        set_delegation(&mut deps.querier, 690, "ustake");
+        // i.e 500_500_000 minus 86_450_000
+        set_delegation(&mut deps.querier, 414_050_000, "ustake");
 
         // check balances
         assert_eq!(get_balance(deps.as_ref(), &bob), bobs_balance);
@@ -1078,23 +1089,28 @@ mod tests {
         }];
         assert_eq!(expected_claims, get_claims(deps.as_ref(), &bob));
 
-        // supplies updated, ratio the same (1.5)
-        let ratio = Decimal::from_str("1.5").unwrap();
+        // spot price has changed
+        let spot_price = Decimal::from_str("0.91").unwrap();
 
         let invest = query_investment(deps.as_ref()).unwrap();
         assert_eq!(invest.token_supply, bobs_balance + owner_cut);
-        assert_eq!(invest.staked_tokens, coin(690, "ustake")); // 1500 - 810
-        assert_eq!(invest.nominal_value, ratio);
+        assert_eq!(invest.staked_tokens, coin(414_050_000, "ustake")); // 500_500_000 minus 86_450_000
+        assert_eq!(invest.nominal_value, spot_price);
     }
 
     #[test]
-    fn staking_claims_paid_out_properly() {
+    fn staking_tests_claims_paid_out_properly() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
-        let curve_type = CurveType::SquareRoot {
+        // TODO test one with sqrt?
+        // let curve_type = CurveType::SquareRoot {
+        //     slope: Uint128::new(1),
+        //     scale: 2,
+        // };
+        let curve_type = CurveType::Linear {
             slope: Uint128::new(1),
-            scale: 2,
+            scale: 1,
         };
 
         // create contract
@@ -1111,22 +1127,49 @@ mod tests {
         instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
 
         // bond some tokens
+        // let bob = String::from("bob");
+        // let info = mock_info(&bob, &coins(1000, "ustake"));
+        // execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Bond {}).unwrap();
+        // set_delegation(&mut deps.querier, 1000, "ustake");
+
+        // let's bond some tokens now
         let bob = String::from("bob");
-        let info = mock_info(&bob, &coins(1000, "ustake"));
-        execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Bond {}).unwrap();
-        set_delegation(&mut deps.querier, 1000, "ustake");
+        let bond_msg = ExecuteMsg::Bond {};
+        let bond_info = mock_info(
+            &bob,
+            &[
+                coin(1000, "this-one-is-ignored"),
+                coin(500_000_000, "ustake"),
+            ],
+        );
+        let res = execute(deps.as_mut(), mock_env(), bond_info, bond_msg).unwrap();
+        assert_eq!(1, res.messages.len());
+
+        // update the querier with new bond
+        set_delegation(&mut deps.querier, 500_000_000, "ustake");
+
+        // check bob's balance is 1k
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
 
         // unbond part of them
         let unbond_msg = ExecuteMsg::Unbond {
-            amount: Uint128::new(600),
+            amount: Uint128::new(200),
         };
         let env = mock_env();
         let info = mock_info(&bob, &[]);
         execute(deps.as_mut(), env.clone(), info.clone(), unbond_msg).unwrap();
-        set_delegation(&mut deps.querier, 460, "ustake");
+        set_delegation(&mut deps.querier, 336_200_000, "ustake");
+
+        // bobs balance has gone down
+        assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(800));
+
+        // overall staked tokens has only gone down by
+        // 500_000_000 - bob's claim
+        let invest = query_investment(deps.as_ref()).unwrap();
+        assert_eq!(invest.staked_tokens, coin(336_200_000, "ustake"));
 
         // ensure claims are proper
-        let bobs_claim = Uint128::new(540);
+        let bobs_claim = Uint128::new(163_800_000);
         let original_claims = vec![Claim {
             amount: bobs_claim,
             release_at: (DAY * 3).after(&env.block),
@@ -1144,19 +1187,26 @@ mod tests {
         );
         assert!(fail.is_err(), "{:?}", fail);
 
-        // provide the balance, but claim not yet mature - also prohibited
+        // provide the balance to cover bob's claim
+        // but claim is not yet mature - also prohibited
         deps.querier
-            .update_balance(MOCK_CONTRACT_ADDR, coins(540, "ustake"));
+            .update_balance(MOCK_CONTRACT_ADDR, coins(163_800_000, "ustake"));
         let fail = execute(deps.as_mut(), too_soon, info.clone(), ExecuteMsg::Claim {});
         assert!(fail.is_err(), "{:?}", fail);
 
         // this should work with cash and claims ready
-        let res = execute(deps.as_mut(), claim_ready, info, ExecuteMsg::Claim {}).unwrap();
+        let res = execute(
+            deps.as_mut(),
+            claim_ready,
+            info.clone(),
+            ExecuteMsg::Claim {},
+        )
+        .unwrap();
         assert_eq!(1, res.messages.len());
         let payout = &res.messages[0];
         match &payout.msg {
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
-                assert_eq!(amount, &coins(540, "ustake"));
+                assert_eq!(amount, &coins(163_800_000, "ustake"));
                 assert_eq!(to_address, &bob);
             }
             _ => panic!("Unexpected message: {:?}", payout),
@@ -1286,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn staking_cw20_imports_work() {
+    fn staking_tests_cw20_imports_work() {
         let mut deps = mock_dependencies(&[]);
         set_validator(&mut deps.querier);
 
@@ -1314,10 +1364,10 @@ mod tests {
         instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
 
         // bond some tokens to create a balance
-        let info = mock_info(&bob, &[coin(10, "random"), coin(1000, "ustake")]);
+        let info = mock_info(&bob, &[coin(10, "random"), coin(500_000_000, "ustake")]);
         execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Bond {}).unwrap();
 
-        // bob got 1000 DRV for 1000 stake at a 1.0 ratio
+        // bob got 1000 DRV for 1000 stake
         assert_eq!(get_balance(deps.as_ref(), &bob), Uint128::new(1000));
 
         // send coins to carl
