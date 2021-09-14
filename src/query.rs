@@ -20,9 +20,9 @@ pub struct TokenInfoResponseWithMeta {
 pub struct InvestmentResponse {
     pub token_supply: Uint128,
     pub staked_tokens: Coin,
-    // ratio of staked_tokens / token_supply (or how many native tokens that one derivative token is nominally worth)
+    // this is covered by curves in our impl
+    // spot price is probably the equivalent
     pub nominal_value: Decimal,
-
     /// owner created the contract and takes a cut
     pub owner: String,
     /// this is how much the owner takes as a cut when someone unbonds

@@ -54,7 +54,9 @@ pub struct InstantiateMsg {
     pub decimals: u8,
 
     /// this is the reserve token denom (only support native for now)
-    pub reserve_denom: String,
+    // think this probably shouldn't even be settable thanks to staking constraints
+    // which mean staking is native
+    // pub reserve_denom: String,
     /// number of decimal places for the reserve token, needed for proper curve math.
     /// Same format as decimals above, eg. if it is uatom, where 1 unit is 10^-6 ATOM, use 6 here
     pub reserve_decimals: u8,
